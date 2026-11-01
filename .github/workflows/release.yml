@@ -108,10 +108,8 @@ jobs:
       enable_ios: ${{ inputs.enable_ios }}
       enable_linux: ${{ inputs.enable_linux }}
     secrets:
-      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      # This fork signs Android with the runner debug keystore; only the
+      # Windows MSIX certificate is wired through.
       MSIX_CERTIFICATE_BASE64: ${{ secrets.MSIX_CERTIFICATE_BASE64 }}
       MSIX_CERTIFICATE_PASSWORD: ${{ secrets.MSIX_CERTIFICATE_PASSWORD }}
 

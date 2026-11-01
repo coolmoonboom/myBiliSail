@@ -51,6 +51,23 @@ void main() {
     }
   });
 
+  test('floating refresh button defaults on and copies independently', () {
+    expect(const AppSettings.defaults().showFloatingRefreshButton, isTrue);
+    expect(AppSettings().showFloatingRefreshButton, isTrue);
+    final settings = AppSettings().copyWith(
+      showFloatingRefreshButton: false,
+      theme: AppThemePreference.amoled,
+    );
+    expect(settings.showFloatingRefreshButton, isFalse);
+    expect(settings.theme, AppThemePreference.amoled);
+    expect(
+      settings
+          .copyWith(theme: AppThemePreference.dark)
+          .showFloatingRefreshButton,
+      isFalse,
+    );
+  });
+
   test('live and video quality defaults normalize independently', () {
     expect(const AppSettings.defaults().preferredLiveQuality, 10000);
     expect(AppSettings().preferredLiveQuality, 10000);

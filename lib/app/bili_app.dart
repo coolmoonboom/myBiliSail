@@ -42,6 +42,7 @@ import '../features/settings/presentation/app_update_host.dart';
 import '../features/settings/domain/app_settings.dart';
 import '../shared/ui/app_notice.dart';
 import '../shared/ui/video_card_interaction_scope.dart';
+import '../shared/ui/floating_actions_scope.dart';
 import '../shared/ui/smooth_scroll_behavior.dart';
 import '../core/presentation/app_input_host.dart';
 import '../core/presentation/android_system_ui.dart';
@@ -437,19 +438,23 @@ class _BiliAppState extends ConsumerState<BiliApp> {
             adapter: widget.videoComposition,
             child: SmoothScrollScope(
               dampingRatio: settings.wheelDampingRatio,
-              child: AppInputHost<Object>(
-                dispatcher: _input,
-                routes: _input.routes,
-                onEditingChanged: widget.dependencies.window.setTextInputActive,
-                child: AppUpdateHost(
-                  navigatorKey: _router.routerDelegate.navigatorKey,
-                  child: AppNoticeHost(
-                    child: VideoCardInteractionScope(
-                      interactions: cardInteractions,
-                      onNotice: showAppNotice,
-                      hoverPlaybackEnabled: settings.videoCardHoverPlayback,
-                      child: AndroidSystemUi(
-                        child: child ?? const SizedBox.shrink(),
+              child: FloatingActionsScope(
+                refreshButtonVisible: settings.showFloatingRefreshButton,
+                child: AppInputHost<Object>(
+                  dispatcher: _input,
+                  routes: _input.routes,
+                  onEditingChanged:
+                      widget.dependencies.window.setTextInputActive,
+                  child: AppUpdateHost(
+                    navigatorKey: _router.routerDelegate.navigatorKey,
+                    child: AppNoticeHost(
+                      child: VideoCardInteractionScope(
+                        interactions: cardInteractions,
+                        onNotice: showAppNotice,
+                        hoverPlaybackEnabled: settings.videoCardHoverPlayback,
+                        child: AndroidSystemUi(
+                          child: child ?? const SizedBox.shrink(),
+                        ),
                       ),
                     ),
                   ),
@@ -465,14 +470,20 @@ class _BiliAppState extends ConsumerState<BiliApp> {
           font: settings.font,
           systemFontFamily: settings.systemFontFamily,
         ),
-        darkTheme: BiliTheme.dark(
-          font: settings.font,
-          systemFontFamily: settings.systemFontFamily,
-        ),
+        darkTheme: settings.theme == AppThemePreference.amoled
+            ? BiliTheme.amoled(
+                font: settings.font,
+                systemFontFamily: settings.systemFontFamily,
+              )
+            : BiliTheme.dark(
+                font: settings.font,
+                systemFontFamily: settings.systemFontFamily,
+              ),
         themeMode: switch (settings.theme) {
           AppThemePreference.system => ThemeMode.system,
           AppThemePreference.light => ThemeMode.light,
           AppThemePreference.dark => ThemeMode.dark,
+          AppThemePreference.amoled => ThemeMode.dark,
         },
         routerConfig: _router,
       ),

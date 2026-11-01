@@ -16,7 +16,7 @@ export '../../../domain/audio_quality.dart';
 export '../../../domain/live_stream_preference.dart';
 export '../../../domain/media_cdn.dart' show MediaCdnPreference;
 
-enum AppThemePreference { system, light, dark }
+enum AppThemePreference { system, light, dark, amoled }
 
 enum WorkspaceNavigationMode { singlePage, multipleTabs, dualTabs }
 
@@ -66,6 +66,7 @@ final class AppSettings {
     this.font = AppFontPreference.harmonyOsSans,
     this.systemFontFamily = '',
     this.cacheImages = true,
+    this.showFloatingRefreshButton = true,
     this.checkPrereleaseUpdates = false,
     this.wheelDampingRatio = 1.3,
     this.danmakuEnabled = true,
@@ -139,6 +140,7 @@ final class AppSettings {
        font = AppFontPreference.harmonyOsSans,
        systemFontFamily = '',
        cacheImages = true,
+       showFloatingRefreshButton = true,
        checkPrereleaseUpdates = false,
        wheelDampingRatio = 1.3,
        danmakuEnabled = true,
@@ -200,6 +202,7 @@ final class AppSettings {
   final String systemFontFamily;
   String? get fontFamily => font.resolveFamily(systemFontFamily);
   final bool cacheImages;
+  final bool showFloatingRefreshButton;
   final bool checkPrereleaseUpdates;
 
   /// Mouse-wheel spring damping ratio; 1 is critically damped.
@@ -280,6 +283,7 @@ final class AppSettings {
     AppFontPreference? font,
     String? systemFontFamily,
     bool? cacheImages,
+    bool? showFloatingRefreshButton,
     bool? checkPrereleaseUpdates,
     double? wheelDampingRatio,
     bool? danmakuEnabled,
@@ -344,6 +348,8 @@ final class AppSettings {
     font: font ?? this.font,
     systemFontFamily: systemFontFamily ?? this.systemFontFamily,
     cacheImages: cacheImages ?? this.cacheImages,
+    showFloatingRefreshButton:
+        showFloatingRefreshButton ?? this.showFloatingRefreshButton,
     checkPrereleaseUpdates:
         checkPrereleaseUpdates ?? this.checkPrereleaseUpdates,
     wheelDampingRatio: wheelDampingRatio ?? this.wheelDampingRatio,

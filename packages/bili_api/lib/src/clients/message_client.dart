@@ -54,14 +54,19 @@ final class MessageClient {
           'end_ts': ?cursor,
         }, context);
     if (!data.containsKey('session_list')) _fail(e);
-    final raw = _list(data['session_list'], e, nullable: true);
-    final rows = raw.map((v) => _map(v, e)).toList();
-    final mids = rows
-        .where(
-          (v) => v['session_type'] == 1 && _count(v['system_msg_type']) == 0,
-        )
-        .map((v) => _decimal(v['talker_id'], e))
-        .toSet();
+    final rows = <_SessionRow>[];
+    for (final value in _list(data['session_list'], e, nullable: true)) {
+      if (value is! Map<String, Object?>) continue;
+      final mid = _optionalDecimal(value['talker_id']);
+      final type = _optionalNumber(value['session_type']);
+      // A row without a talker or session type has no usable identity.
+      if (mid == null || type == null) continue;
+      rows.add((data: value, mid: mid, type: type));
+    }
+    final mids = {
+      for (final row in rows)
+        if (row.type == 1 && _count(row.data['system_msg_type']) == 0) row.mid,
+    };
     final users = <String, Map<String, Object?>>{};
     if (mids.isNotEmpty) {
       final cards = await _get(
@@ -71,53 +76,52 @@ final class MessageClient {
         {'uids': mids.join(',')},
         context,
       );
-      final values = cards['list'] is List<Object?>
-          ? _list(cards['list'], 'message_users')
-          : cards.values.toList();
-      for (final value in values) {
-        final user = _map(value, 'message_users');
-        users[_decimal(user['mid'], 'message_users')] = user;
+      final listed = cards['list'];
+      for (final value in listed is List<Object?> ? listed : cards.values) {
+        if (value is! Map<String, Object?>) continue;
+        final mid = _optionalDecimal(value['mid']);
+        if (mid != null) users[mid] = value;
       }
     }
     final entries = rows
         .map((row) {
-          final mid = _decimal(row['talker_id'], e);
-          final type = _number(row['session_type'], e);
-          final system = _count(row['system_msg_type']) != 0;
-          final account = _optionalMap(row['account_info']);
-          final user = users[mid] ?? account;
-          final last = row['last_msg'];
-          final message = last == null ? null : _message(_map(last, e), e);
+          final data = row.data;
+          final system = _count(data['system_msg_type']) != 0;
+          final account = _optionalMap(data['account_info']);
+          final user = users[row.mid] ?? account;
+          final last = data['last_msg'];
+          final message = last is Map<String, Object?> ? _message(last) : null;
           return ApiInboxEntry(
-            id: '$type:$mid',
-            userMid: mid,
-            sessionType: type,
+            id: '${row.type}:${row.mid}',
+            userMid: row.mid,
+            sessionType: row.type,
             system: system,
             title: _text(user['name']).isNotEmpty
                 ? _text(user['name'])
                 : _text(account['uname']).isNotEmpty
                 ? _text(account['uname'])
-                : _text(row['group_name']).isNotEmpty
-                ? _text(row['group_name'])
-                : '用户 $mid',
+                : _text(data['group_name']).isNotEmpty
+                ? _text(data['group_name'])
+                : '用户 ${row.mid}',
             text: message?.text ?? '暂无消息',
             avatarUrl: _uri(
               user['face'] ??
                   account['pic_url'] ??
                   account['pic'] ??
-                  row['group_cover'],
+                  data['group_cover'],
             ),
             time: message?.time,
-            unread: _count(row['unread_count']),
-            lastSequence: row['max_seqno'] == null
-                ? message?.sequence
-                : _decimal(row['max_seqno'], e, zero: true),
+            unread: _count(data['unread_count']),
+            lastSequence:
+                _optionalDecimal(data['max_seqno'], zero: true) ??
+                message?.sequence,
           );
         })
         .toList(growable: false);
+    // A missing trailing cursor only stops pagination for the next page.
     final next = rows.isEmpty
         ? null
-        : _decimal(rows.last['session_ts'], e, zero: true);
+        : _optionalDecimal(rows.last.data['session_ts'], zero: true);
     return _page(entries, _yes(data['has_more']), next, cursor);
   }
 
@@ -142,11 +146,13 @@ final class MessageClient {
           'end_seqno': ?cursor,
         }, context);
     if (!data.containsKey('messages')) _fail(e);
-    final messages = _list(
-      data['messages'],
-      e,
-      nullable: true,
-    ).map((v) => _message(_map(v, e), e)).toList();
+    final messages = <ApiPrivateMessage>[];
+    for (final value in _list(data['messages'], e, nullable: true)) {
+      if (value is! Map<String, Object?>) continue;
+      final message = _message(value);
+      // Messages without a sequence cannot be deduplicated or paged.
+      if (message.sequence != '0') messages.add(message);
+    }
     messages.sort(
       (a, b) => BigInt.parse(a.sequence).compareTo(BigInt.parse(b.sequence)),
     );
@@ -202,29 +208,31 @@ final class MessageClient {
         _fail(e);
       }
       final entries =
-          _list(
-            data['system_notify_list'] ?? data['list'],
-            e,
-            nullable: true,
-          ).map((value) {
-            final row = _map(value, e);
-            return ApiInboxEntry(
-              id: _decimal(row['id'], e),
-              title: _text(row['title']).isEmpty ? '系统通知' : _text(row['title']),
-              text: _text(row['content']),
-              time: _time(row['time_at']),
-              targetUrl: _uri(row['link']),
-              system: true,
-              readCursor: row['cursor'] == null
-                  ? null
-                  : _decimal(row['cursor'], e),
-            );
-          }).toList();
+          _list(data['system_notify_list'] ?? data['list'], e, nullable: true)
+              .map((value) {
+                if (value is! Map<String, Object?>) return null;
+                final row = value;
+                final id = _optionalDecimal(row['id']);
+                if (id == null) return null;
+                return ApiInboxEntry(
+                  id: id,
+                  title: _text(row['title']).isEmpty
+                      ? '系统通知'
+                      : _text(row['title']),
+                  text: _text(row['content']),
+                  time: _time(row['time_at']),
+                  targetUrl: _uri(row['link']),
+                  system: true,
+                  readCursor: _optionalDecimal(row['cursor']),
+                );
+              })
+              .whereType<ApiInboxEntry>()
+              .toList();
       // This endpoint exposes no usable cursor in the verified Web response.
       return ApiPage(List.unmodifiable(entries), hasMore: false);
     }
     final total = section == ApiInboxSection.likes
-        ? _map(data['total'], e)
+        ? _optionalMap(data['total'])
         : data;
     final latest = section == ApiInboxSection.likes
         ? _optionalMap(data['latest'] ?? data['lastest'])
@@ -236,15 +244,20 @@ final class MessageClient {
     ];
     final entries = <String, ApiInboxEntry>{};
     for (final value in raw) {
-      final row = _map(value, e), item = _map(_map(value, e)['item'], e);
+      if (value is! Map<String, Object?>) continue;
+      final row = value, item = _optionalMap(row['item']);
       final users = row['users'];
-      final user = row['user'] is Map<String, Object?>
-          ? _map(row['user'], e)
-          : users is List<Object?> && users.isNotEmpty
-          ? _map(users.first, e)
+      final listedUser = row['user'] is Map<String, Object?>
+          ? row['user']
+          : users is List<Object?> && users.first is Map<String, Object?>
+          ? users.first
+          : null;
+      final user = listedUser is Map<String, Object?>
+          ? listedUser
           : const <String, Object?>{};
-      final mid = user['mid'] == null ? null : _decimal(user['mid'], e);
-      final id = _decimal(row['id'], e);
+      final mid = user['mid'] == null ? null : _optionalDecimal(user['mid']);
+      final id = _optionalDecimal(row['id']);
+      if (id == null) continue;
       final actor = _text(user['nickname'] ?? user['name']);
       final verb = switch (section) {
         ApiInboxSection.replies => '回复了你',
@@ -265,9 +278,12 @@ final class MessageClient {
         targetUrl: _uri(item['uri']),
       );
     }
-    final c = _map(total['cursor'], e);
-    final next =
-        '${_decimal(c['id'], e, zero: true)}:${_decimal(c['time'], e, zero: true)}';
+    final c = _optionalMap(total['cursor']);
+    final cursorId = _optionalDecimal(c['id'], zero: true);
+    final cursorTime = _optionalDecimal(c['time'], zero: true);
+    final next = cursorId == null || cursorTime == null
+        ? null
+        : '$cursorId:$cursorTime';
     return _page(entries.values.toList(), !_yes(c['is_end']), next, cursor);
   }
 
@@ -327,24 +343,18 @@ final class MessageClient {
     return api.acknowledgeSystemNotifications(cursor, context: context);
   }
 
-  ApiPrivateMessage _message(Map<String, Object?> row, String e) {
-    final type = _number(row['msg_type'], e);
-    final sequence = _decimal(row['msg_seqno'], e, zero: true);
-    final sender = _decimal(row['sender_uid'], e);
-    final revoked =
-        _count(row['msg_status']) == 1 ||
-        _count(row['msg_status']) == 2 ||
-        type == 5;
+  /// One unreadable row degrades to a placeholder: an unknown type or odd
+  /// payload never removes the rest of the page from the inbox.
+  ApiPrivateMessage _message(Map<String, Object?> row) {
+    final type = _optionalNumber(row['msg_type']) ?? 0;
+    final sequence = _optionalDecimal(row['msg_seqno'], zero: true) ?? '0';
+    final sender = _optionalDecimal(row['sender_uid'], zero: true) ?? '0';
+    final status = _count(row['msg_status']);
+    final revoked = status == 1 || status == 2 || type == 5;
     // The server may still include recalled text: never decode or display it.
-    var content = const <String, Object?>{};
-    if (!revoked && row['content'] is String) {
-      try {
-        content = _map(jsonDecode(row['content'] as String), e);
-      } on FormatException {
-        _fail(e);
-      }
-    }
-    if (!revoked && type == 1 && content['content'] is! String) _fail(e);
+    final content = !revoked && row['content'] is String
+        ? _decodedContent(row['content'] as String)
+        : const <String, Object?>{};
     final image = !revoked && type == 2 ? _uri(content['url']) : null;
     final text = revoked
         ? '消息已撤回'
@@ -369,6 +379,22 @@ final class MessageClient {
     );
   }
 
+  /// Template cards arrive as a JSON object or an array of card objects.
+  Map<String, Object?> _decodedContent(String value) {
+    if (value.length > 65536) return const {};
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(value);
+    } on FormatException {
+      return const {};
+    }
+    if (decoded is Map<String, Object?>) return decoded;
+    if (decoded is List<Object?>) {
+      return decoded.whereType<Map<String, Object?>>().firstOrNull ?? const {};
+    }
+    return const {};
+  }
+
   ApiPage<T> _page<T>(
     List<T> items,
     bool more,
@@ -380,8 +406,18 @@ final class MessageClient {
     nextCursor: next,
   );
   Never _fail(String e) => throw ApiFailure(ApiFailureCategory.protocol, e);
-  Map<String, Object?> _map(Object? v, String e) =>
-      v is Map<String, Object?> ? v : _fail(e);
+  String? _optionalDecimal(Object? v, {bool zero = false}) {
+    final text = v is int || v is String ? '$v' : '';
+    final pattern = zero ? r'^[0-9]+$' : r'^[1-9][0-9]*$';
+    return RegExp(pattern).hasMatch(text) ? text : null;
+  }
+
+  int? _optionalNumber(Object? v) => v is int
+      ? v
+      : v is String
+      ? int.tryParse(v)
+      : null;
+
   Map<String, Object?> _optionalMap(Object? v) =>
       v is Map<String, Object?> ? v : const {};
   List<Object?> _list(Object? v, String e, {bool nullable = false}) =>
@@ -397,7 +433,6 @@ final class MessageClient {
     return s;
   }
 
-  int _number(Object? v, String e) => v is int ? v : _fail(e);
   int _count(Object? v) => v is int && v >= 0 ? v : 0;
   bool _yes(Object? v) => v == 1 || v == true;
   String _text(Object? v) => v is String ? v : '';
@@ -422,3 +457,5 @@ final class MessageClient {
     return uri.replace(scheme: 'https');
   }
 }
+
+typedef _SessionRow = ({Map<String, Object?> data, String mid, int type});

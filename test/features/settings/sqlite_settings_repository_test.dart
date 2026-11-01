@@ -18,6 +18,28 @@ void main() {
   });
   tearDown(() => database.close());
   test(
+    'floating refresh button persists and invalid values fall back',
+    () async {
+      expect((await repository.load()).showFloatingRefreshButton, isTrue);
+      await repository.save(
+        (await repository.load()).copyWith(showFloatingRefreshButton: false),
+      );
+      expect((await repository.load()).showFloatingRefreshButton, isFalse);
+      for (final value in <Object?>[null, 'false', 0]) {
+        await database.writeSetting(
+          'preferences.v1',
+          jsonEncode({'schemaVersion': 32, 'showFloatingRefreshButton': value}),
+        );
+        expect((await repository.load()).showFloatingRefreshButton, isTrue);
+      }
+      await database.writeSetting(
+        'preferences.v1',
+        jsonEncode({'schemaVersion': 32, 'showFloatingRefreshButton': false}),
+      );
+      expect((await repository.load()).showFloatingRefreshButton, isFalse);
+    },
+  );
+  test(
     'related autoplay defaults, invalid snapshots, save and reset',
     () async {
       expect(AppSettings().continuousRelatedPlayback, isFalse);
@@ -811,6 +833,27 @@ void main() {
     expect(reloaded.navigationMode, WorkspaceNavigationMode.dualTabs);
     expect(reloaded.theme, AppThemePreference.dark);
   });
+  test(
+    'amoled theme persists by name and older values keep resolving',
+    () async {
+      await repository.save(AppSettings(theme: AppThemePreference.amoled));
+      final snapshot = jsonDecode(
+        (await database.readSetting('preferences.v1'))!,
+      );
+      expect(snapshot['theme'], 'amoled');
+      expect((await repository.load()).theme, AppThemePreference.amoled);
+      for (final name in ['system', 'light', 'dark', 'amoled']) {
+        await database.writeSetting(
+          'preferences.v1',
+          jsonEncode({'theme': name}),
+        );
+        expect(
+          (await repository.load()).theme,
+          AppThemePreference.values.byName(name),
+        );
+      }
+    },
+  );
   test('concurrent playback migrates with compatible defaults and retains its preference', () async {
     expect((await repository.load()).allowConcurrentPlayback, isFalse);
     for (final oldValue in [null, 'false', 0, false, true]) {

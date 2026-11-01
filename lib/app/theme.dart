@@ -16,13 +16,43 @@ abstract final class BiliTheme {
     String systemFontFamily = '',
   }) => _build(Brightness.dark, font.resolveFamily(systemFontFamily));
 
-  static ThemeData _build(Brightness brightness, String? fontFamily) {
+  /// Pure black dark variant for AMOLED panels. Keeps the dark palette hues so
+  /// only the luminance floor drops to 0x000000, letting OLED pixels turn off.
+  static ThemeData amoled({
+    AppFontPreference font = AppFontPreference.harmonyOsSans,
+    String systemFontFamily = '',
+  }) => _build(
+    Brightness.dark,
+    font.resolveFamily(systemFontFamily),
+    amoled: true,
+  );
+
+  static ThemeData _build(
+    Brightness brightness,
+    String? fontFamily, {
+    bool amoled = false,
+  }) {
     final dark = brightness == Brightness.dark;
-    final surface = dark ? const Color(0xFF1C2530) : canvas;
+    final surface = dark
+        ? (amoled ? const Color(0xFF000000) : const Color(0xFF1C2530))
+        : canvas;
     final foreground = dark ? const Color(0xFFEAEAEA) : ink;
     final muted = dark ? const Color(0xFFACB8C7) : const Color(0xFF66778A);
-    final panel = dark ? const Color(0xFF232F3D) : const Color(0xFFF2F6FA);
-    final border = dark ? const Color(0xFF384657) : const Color(0xFFE1E9F1);
+    final panel = dark
+        ? (amoled ? const Color(0xFF0E141A) : const Color(0xFF232F3D))
+        : const Color(0xFFF2F6FA);
+    final border = dark
+        ? (amoled ? const Color(0xFF202B36) : const Color(0xFF384657))
+        : const Color(0xFFE1E9F1);
+    final containerHigh = dark
+        ? (amoled ? const Color(0xFF151D25) : const Color(0xFF2C3948))
+        : const Color(0xFFEAF1F7);
+    final containerHighest = dark
+        ? (amoled ? const Color(0xFF1B242E) : const Color(0xFF334252))
+        : const Color(0xFFE3EDF5);
+    final scaffoldBackground = dark
+        ? (amoled ? const Color(0xFF000000) : const Color(0xFF141D27))
+        : const Color(0xFFEDF3F9);
     final primary = dark ? const Color(0xFFEF8399) : accent;
     final scheme =
         ColorScheme.fromSeed(
@@ -32,7 +62,7 @@ abstract final class BiliTheme {
           primary: primary,
           onPrimary: dark ? const Color(0xFF35131C) : Colors.white,
           primaryContainer: dark
-              ? const Color(0xFF442730)
+              ? (amoled ? const Color(0xFF2E1A21) : const Color(0xFF442730))
               : const Color(0xFFFFEFF2),
           onPrimaryContainer: primary,
           secondary: primary,
@@ -42,12 +72,8 @@ abstract final class BiliTheme {
           surfaceContainerLowest: surface,
           surfaceContainerLow: panel,
           surfaceContainer: panel,
-          surfaceContainerHigh: dark
-              ? const Color(0xFF2C3948)
-              : const Color(0xFFEAF1F7),
-          surfaceContainerHighest: dark
-              ? const Color(0xFF334252)
-              : const Color(0xFFE3EDF5),
+          surfaceContainerHigh: containerHigh,
+          surfaceContainerHighest: containerHighest,
           outline: muted,
           outlineVariant: border,
         );
@@ -56,9 +82,7 @@ abstract final class BiliTheme {
       brightness: brightness,
       colorScheme: scheme,
       fontFamily: fontFamily,
-      scaffoldBackgroundColor: dark
-          ? const Color(0xFF141D27)
-          : const Color(0xFFEDF3F9),
+      scaffoldBackgroundColor: scaffoldBackground,
       dividerColor: border,
       hoverColor: primary.withValues(alpha: 0.045),
       focusColor: primary.withValues(alpha: 0.1),

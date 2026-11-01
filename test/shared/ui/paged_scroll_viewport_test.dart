@@ -1,3 +1,4 @@
+import 'package:bilisail/shared/ui/floating_actions_scope.dart';
 import 'package:bilisail/shared/ui/paged_scroll_viewport.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -55,6 +56,26 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pumpAndSettle();
     expect(find.byTooltip('回到顶部'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('floating refresh button follows the app-wide scope', (
+    tester,
+  ) async {
+    Widget wrap(bool visible) => FloatingActionsScope(
+      refreshButtonVisible: visible,
+      child: _app(contentHeight: 1400, onRefresh: () async {}),
+    );
+    await tester.pumpWidget(wrap(false));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('刷新列表'), findsNothing);
+    await _wheel(tester, 200);
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('回到顶部'), findsOneWidget);
+    expect(find.byTooltip('刷新列表'), findsNothing);
+    await tester.pumpWidget(wrap(true));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('刷新列表'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }

@@ -12,7 +12,7 @@
 | 任务 | Runner | 产物与边界 |
 | --- | --- | --- |
 | 版本解析、静态检查、根测试分片与包测试 | `ubuntu-24.04` | 无需真实账号；独立 mux 任务覆盖封装原生测试，不自动运行在线或原生播放集成测试 |
-| Android | `ubuntu-24.04`，Temurin JDK 17 | 仅 arm64 的 release APK；正常构建复用固定 keystore，PR 使用临时预览签名 |
+| Android | `ubuntu-24.04`，Temurin JDK 17 | 仅 arm64 的 release APK；本 fork 统一使用 runner 本地 debug keystore 签名（含 Release），不注入仓库签名密钥 |
 | Windows | `windows-2022`，Visual Studio C++ / Windows SDK / .NET 8 / WiX 6.0.2 | 同时提供 x64 MSIX、MSI 和 EXE 安装包；全部包含完整原生 DLL/data 及 VC++ runtime |
 | macOS | `macos-15`，Apple Silicon / Xcode | arm64 DMG；先验证签名／最终权限、同一 Release 应用首帧和跨进程 Keychain 读写删除，再由 `hdiutil` 打包校验；仅 ad-hoc 签名，未 notarize |
 | macOS Intel | `macos-15-intel`，Intel x64 / Xcode | x64 DMG；复用相同的签名、首帧、Keychain 和镜像校验门槛 |
@@ -83,9 +83,9 @@ CI 仅在 `workflow_call` 开放内部 `build_targets` JSON 数组输入，将�
 
 草稿任务从本次运行下载补建产物，再按各目标的来源 run ID 和准确 artifact 名称，通过 `gh run download` 合并复用产物，无需重复上传到当前运行。API 权限、网络或下载错误均使任务失败，不将故障当作未命中，也不丢弃缺失平台；使用任务级 `actions: read` 和现有 `GITHUB_TOKEN`，无需新 Secret。每个目标的复用／构建决定及来源运行链接写入 Actions summary。
 
-无论复用还是新构建，创建草稿前都会经[产物校验脚本](../../tool/release-ci-reuse.cjs)核对完整文件集合：所选平台安装包、Windows 公钥证书、build-info、mux 源码归档及各自 SHA-256。build-info 必须匹配源码 SHA、版本、目标、Flutter 版本、根锁文件哈希且 `sourceDirty=false`；锁文件允许同一内容的 LF／CRLF checkout 哈希差异。Android 必须使用配置的固定 keystore，临时 PR 签名不得发布。下载后任何内容不符立即停止，不创建草稿，也不静默改用其他产物。既有 tag 冲突检查、草稿／预发布属性和最新 15 个 Release 保留规则继续沿用。
+无论复用还是新构建，创建草稿前都会经[产物校验脚本](../../tool/release-ci-reuse.cjs)核对完整文件集合：所选平台安装包、Windows 公钥证书、build-info、mux 源码归档及各自 SHA-256。build-info 必须匹配源码 SHA、版本、目标、Flutter 版本、根锁文件哈希且 `sourceDirty=false`；锁文件允许同一内容的 LF／CRLF checkout 哈希差异。本 fork 的 Android 产物统一为本地 debug 签名，`temporary-debug-key` 允许发布；其他未知签名方式仍拒绝。下载后任何内容不符立即停止，不创建草稿，也不静默改用其他产物。既有 tag 冲突检查、草稿／预发布属性和最新 15 个 Release 保留规则继续沿用。
 
-本地定向验证：`node --test tool/test-release-ci-reuse.cjs` 的 53 项测试通过，覆盖多运行合并、64 种复用／补建组合、共享检查与目标任务状态、准确来源下载及失败传播、过期／缺失／临时签名／篡改拒绝、Windows 换行及草稿任务条件的 128 种状态组合；`tool/test-ci-build-plan.ps1` 的 117 项检查通过，覆盖全部 32 种平台开关组合、63 种非空目标子集及共享版本／输入边界。两个工作流通过 actionlint 1.7.12，修改的 PowerShell／JavaScript 通过语法检查，本文件 38 条本地链接及 `git diff --check` 通过。
+2026-11-01 切到本地 debug 签名后的定向验证：`node --test tool/test-release-ci-reuse.cjs` 的 61 项中 60 项通过，1 项因本机没有 `pwsh` 未执行；覆盖未知签名拒绝与 `temporary-debug-key` 接受两条新用例。两份工作流改用 Python `yaml.safe_load` 解析通过；本机没有 actionlint 与 PowerShell，相关静态检查未执行，`tool/test-ci-build-plan.ps1` 也未重跑。本文件本地链接与 `git diff --check` 通过。
 
 本轮 `tool/check.ps1 -SkipPub` 的打包边界、格式、静态分析、根应用 3752 项及四包 754 项离线测试通过；13 项 Windows symlink 用例因权限跳过，10 项 mux 原生用例因未配置 `BILI_MUX_LIBRARY` 跳过，不计作原生集成覆盖。按平台复用版本的日志保存在 `build/release-ci-partial-reuse-check.log`。本轮未做安装包构建和设备测试；远端 CI 产物复用和 Release 草稿创建尚未执行，需在本次工作流生效并有对应检查与目标构建通过的 CI 后验证。
 
@@ -133,38 +133,17 @@ Release 草稿及全部附件上传成功后，使用 GitHub 官方 [actions/git
 
 本机 Windows / Flutter 3.47.6 的 `tool/check.ps1 -SkipPub` 全部通过，覆盖打包边界、格式、静态分析及 4651 项 Dart／Flutter 测试（根应用 3860、API 536、播放器 105、弹幕 145、封装 5）。13 项 Windows 符号链接用例因权限不足、10 项 mux 原生用例因未配置 `BILI_MUX_LIBRARY` 跳过，不计作原生覆盖。本文 43 条本地链接与 `git diff --check` 通过，五份锁文件无修改。日志为 `build/api-deadline-clock-fix-check.log`。本次修改仅涉及测试与验证记录，未执行新安装包构建或设备操作；没有运行中的调试应用可执行热重载。
 
-## Android 固定签名与覆盖升级
+## Android 本地 debug 签名
 
-2026-10-07 起，push、手动 CI 和 Release 共用固定 release keystore。仓库 Actions Secrets 配置：
+本 fork 自 2026-11-01 起不再使用仓库固定 release keystore。push、手动 CI 和 Release 的 Android arm64 APK 全部由 runner 的本地 debug keystore 签名，工作流不注入、也不接收 `ANDROID_KEYSTORE_BASE64` 等签名密钥；`.github/workflows/ci.yml` 的 `workflow_call.secrets` 只保留 Windows MSIX 证书。
 
-| 名称 | 内容 |
-| --- | --- |
-| `ANDROID_KEYSTORE_BASE64` | 长期保存的 keystore 文件的 Base64 |
-| `ANDROID_KEYSTORE_PASSWORD` | keystore 密码 |
-| `ANDROID_KEY_ALIAS` | 签名私钥别名 |
-| `ANDROID_KEY_PASSWORD` | 签名私钥密码 |
+构建时仍显式传入 `-AndroidPreviewSigning`，由 [Android 签名辅助脚本](../../tool/android-signing.ps1) 把 `ANDROID_PREVIEW_SIGNING=true` 交给 Gradle，`android/app/build.gradle.kts` 选择 `debug` 签名配置，metadata 记录 `signing=temporary-debug-key`。打包后仍用 `apksigner verify --print-certs-pem` 校验唯一签名证书并写入 `androidSigningCertificateSha256`，只是不再与仓库变量比对。
 
-Actions Variable `ANDROID_SIGNING_CERTIFICATE_SHA256` 保存该证书的 64 位十六进制 SHA-256。工作流仅在 Android 的非 PR 打包步骤注入私钥 Secrets；Release 显式将同一组 Secrets 传给复用 CI。缺失、配置不完整、文件无效、密码错误或证书指纹不符均失败，不自动生成密钥或降级为 debug 签名。
+[发布产物校验](../../tool/release-ci-reuse.cjs) 对 Android 接受 `configured-keystore` 与 `temporary-debug-key`，其他签名方式仍拒绝，避免把未签名或来源不明的包发出去。这改变了本 fork 的升级链：debug 签名只能覆盖同为同一 debug keystore 的构建，换机器或重新生成 keystore 后需卸载重装，卸载会清除应用私有数据。沿用官方固定签名链的构建仍可复用同一校验，只需在 metadata 中标记 `configured-keystore`。
 
-[Android 签名辅助脚本](../../tool/android-signing.ps1) 将 keystore 还原到独立临时目录，Linux 目录权限为 `700`；密码仅经进程环境传给 Gradle，不生成含密码的 `key.properties`。打包成功后使用 Android SDK 的 `apksigner verify --verbose --print-certs-pem` 验证 APK，从标准 PEM 证书的 DER 内容计算 SHA-256，要求唯一签名证书且指纹与仓库变量一致；metadata 标记 `signing=configured-keystore` 并保存实际 `androidSigningCertificateSha256`。成功或失败均清理临时 keystore。
+包名保持 `dev.bilisail.bilisail`，`versionCode` 继续使用紧凑编码 `x*10000 + y*1000 + z*100 + N` 并禁用 ABI 偏移，发布时必须递增。参考 [Android 签名](https://developer.android.com/studio/publish/app-signing)、[版本号](https://developer.android.com/studio/publish/versioning)。
 
-PR 不接收长期签名 Secrets，仅通过 `-AndroidPreviewSigning` 显式启用临时 debug 签名，metadata 为 `temporary-debug-key`。这些预览包不属于长期升级链。该模式若收到 release 密钥则拒绝执行。普通 debug 开发不需要 release 凭据；直接 `flutter build apk --release` 需要设置 `ANDROID_KEYSTORE_PATH`、密码和别名环境变量，缺失时拒绝构建。
-
-本机打包可用 `ANDROID_KEYSTORE_PATH` 替代 Base64，但二者只能选一个，并设置同一组密码、别名、证书 SHA-256 以及 `ANDROID_HOME` 或 `ANDROID_SDK_ROOT`。私钥及密码不进入源码、产物、日志或普通配置文件；离线备份须保留 keystore 与受保护的密码。
-
-包名保持 `dev.bilisail.bilisail`。后续发布必须保持同一密钥并递增编码后的 Android versionCode；当前使用上文的紧凑编码且禁用 ABI 偏移，不再使用旧版 `N+2000`。旧临时 debug 签名包不能直接覆盖为不同密钥的新包，原私钥未保存时首次切换需卸载重装，卸载会影响应用私有数据。参考 [Android 签名与升级](https://developer.android.com/studio/publish/app-signing#considerations)、[Android 版本号](https://developer.android.com/studio/publish/versioning#appversioning)、[apksigner](https://developer.android.com/tools/apksigner)。
-
-[签名边界检查](../../tool/test-android-signing.ps1) 已加入 `tool/check.ps1`，覆盖缺失配置、错误 Base64、预览密钥隔离、临时文件清理、调用方 keystore 保留和错误 APK 证书拒绝。实机安装与覆盖升级仍需单独验收。
-
-2026-10-07 本机验证：已配置上述四个 Secrets 与证书指纹变量，生成 RSA 3072 位固定签名密钥，证书有效期至 2056-09-29；keystore 和 DPAPI 加密的密码备份保存在仓库外，仅当前 Windows 用户与 SYSTEM 可访问。证书 SHA-256 为 `be3770071a0e9c71a701405a685dd455cd1baa134abd2eac2d97b9926349996e`。
-
-- `tool/check.ps1 -EnforceLockfile` 的格式、分析、1333 个应用／包测试和 20 个签名边界检查通过，四份锁文件未变。
-- actionlint 1.7.12、PowerShell 解析、144 条相对文档链接及差异检查通过。
-- Gradle 在缺少密钥时拒绝 `preReleaseBuild`，无 release 凭据时 `preDebugBuild` 通过。
-- 在独立检出中生成 `0.3.0+1` 的 arm64 release APK；实际 application ID 为 `dev.bilisail.bilisail`、versionCode 为 `2001`、最低 API 为 `24`。APK 签名、固定证书指纹、单 arm64 ABI、metadata 与 SHA-256 校验通过，包内无 keystore／密码文件，临时签名目录已清理。
-- 本地首次构建受其他开发操作生成的 dev-only 插件注册文件干扰；独立检出的 SQLite 原生资产下载另遇 TLS 连接中断，随后复用经包内固定 SHA-256 验证的缓存完成构建，未改 TLS 验证或生成源码。真实 Android 设备安装、旧临时签名切换与固定签名下的覆盖升级尚未实测。
-
-后续验证修正：远端 [CI 37578713971](https://github.com/CKopoer/BiliSail/actions/runs/37578713971/job/112654748403) 已生成 APK，但原先按人类可读摘要行解析证书的检查失败，未上传 Android 产物。改为读取标准 PEM 证书并自行计算指纹，新增格式变化、重复摘要行和非法证书覆盖；21 项签名边界检查与本机实际 APK 证书校验通过。修复后的远端 CI 结果尚待确认。
+[签名边界检查](../../tool/test-android-signing.ps1) 仍随 `tool/check.ps1` 运行，覆盖错误 Base64、预览与 release 密钥互斥、临时文件清理和调用方环境恢复；Android 实机安装与覆盖升级仍需单独验收。
 
 ## Android 本地开发测试别名（2026-10-26）
 

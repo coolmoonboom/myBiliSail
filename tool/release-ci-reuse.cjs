@@ -118,8 +118,11 @@ async function verifyReleaseAssets({ directory, version, targets, sourceRevision
         !pubspecLockSha256s.includes(metadata.pubspecLockSha256)) {
       throw new Error(`Build provenance does not match this release for ${target}.`);
     }
-    if (target === 'android-arm64' && metadata.signing !== 'configured-keystore') {
-      throw new Error('Android release requires the configured release keystore.');
+    // This fork publishes Android packages signed with the local debug
+    // keystore; reject only unknown or unsigned provenance.
+    if (target === 'android-arm64' &&
+        !['configured-keystore', 'temporary-debug-key'].includes(metadata.signing)) {
+      throw new Error('Android release requires a debug or configured keystore signature.');
     }
   }
 }

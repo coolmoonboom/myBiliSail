@@ -154,7 +154,7 @@ void main() {
     expect(entry.imageUrl, isNull);
     expect(entry.targetUrl, isNull);
   });
-  test('unknown message types degrade visibly; malformed JSON fails', () async {
+  test('unknown message types and broken payloads degrade visibly', () async {
     transport.handler = (_) => {
       'messages': [message(type: 99, content: '{}')],
       'has_more': 0,
@@ -164,8 +164,75 @@ void main() {
       'messages': [message(content: '{bad')],
       'has_more': 0,
     };
-    await expectLater(client.thread('123', 1), throwsA(isA<ApiFailure>()));
+    expect(
+      (await client.thread('123', 1)).items.single.text,
+      contains('暂不支持的消息类型'),
+    );
   });
+  test('one unreadable message never removes the rest of the page', () async {
+    transport.handler = (_) => {
+      'messages': [
+        message(),
+        message(
+          sequence: '9007199254740993124',
+          content: jsonEncode([
+            {'title': '模板标题', 'text': '模板正文'},
+          ]),
+        ),
+        {'sender_uid': '123', 'content': 'x'},
+        message(sequence: '0'),
+        'malformed row',
+      ],
+      'has_more': 0,
+    };
+    final page = await client.thread('123', 1);
+    expect(page.items.map((item) => item.sequence), [
+      '9007199254740993123',
+      '9007199254740993124',
+    ]);
+    expect(page.items.last.text, '模板标题\n模板正文');
+  });
+  test(
+    'sessions skip unusable rows and decode template card content',
+    () async {
+      transport.handler = (uri) {
+        if (uri.path.endsWith('/cards')) {
+          return {
+            'list': [
+              {'mid': '123', 'name': '甲'},
+              'malformed card',
+            ],
+          };
+        }
+        return {
+          'session_list': [
+            {'session_type': 1, 'last_msg': message()},
+            {'talker_id': '123', 'session_type': 1, 'last_msg': message()},
+            {
+              'talker_id': '456',
+              'session_type': 1,
+              'last_msg': message(
+                content: jsonEncode([
+                  {'title': '系统通知', 'text': '请查看'},
+                ]),
+              ),
+            },
+            {
+              'talker_id': '789',
+              'session_type': 2,
+              'last_msg': message(content: '{bad'),
+            },
+          ],
+          'has_more': 0,
+        };
+      };
+      final result = await client.sessions();
+      expect(result.items.map((item) => item.userMid), ['123', '456', '789']);
+      expect(result.items.first.title, '甲');
+      expect(result.items[1].text, '系统通知\n请查看');
+      expect(result.items[2].text, contains('暂不支持的消息类型'));
+    },
+  );
   test('reply cursor keeps exact ID/time; empty notices are valid', () async {
     transport.handler = (uri) {
       expect(uri.queryParameters['id'], '9007199254740993123');

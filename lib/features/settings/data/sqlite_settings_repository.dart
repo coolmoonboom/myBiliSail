@@ -90,6 +90,7 @@ class SqliteSettingsRepository implements SettingsRepository {
       sidebarCollapsed: boolean('sidebarCollapsed', false),
       allowConcurrentPlayback: boolean('allowConcurrentPlayback', false),
       cacheImages: boolean('cacheImages', true),
+      showFloatingRefreshButton: boolean('showFloatingRefreshButton', true),
       checkPrereleaseUpdates: boolean('checkPrereleaseUpdates', false),
       wheelDampingRatio: number('wheelDampingRatio', 1.3),
       systemFontFamily: decoded['systemFontFamily'] is String
@@ -243,6 +244,7 @@ class SqliteSettingsRepository implements SettingsRepository {
         'navigationMode': value.navigationMode.name,
         'allowConcurrentPlayback': value.allowConcurrentPlayback,
         'cacheImages': value.cacheImages,
+        'showFloatingRefreshButton': value.showFloatingRefreshButton,
         'checkPrereleaseUpdates': value.checkPrereleaseUpdates,
         'wheelDampingRatio': value.wheelDampingRatio,
         'shortcuts': value.shortcuts.toJson(),

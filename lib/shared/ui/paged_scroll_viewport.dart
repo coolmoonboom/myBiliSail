@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../core/presentation/workspace_activity.dart';
+import 'floating_actions_scope.dart';
 import 'scroll_floating_actions.dart';
 import 'scroll_collapsing_header.dart';
 
@@ -184,6 +185,9 @@ final class _PagedScrollViewportState extends State<PagedScrollViewport> {
   @override
   Widget build(BuildContext context) {
     _syncActivity();
+    final showRefreshButton = FloatingActionsScope.refreshButtonVisibleOf(
+      context,
+    );
     return Stack(
       children: [
         TickerMode(
@@ -204,7 +208,7 @@ final class _PagedScrollViewportState extends State<PagedScrollViewport> {
               valueListenable: _showTop,
               builder: (context, showTop, _) => ScrollFloatingActions(
                 refreshTooltip: widget.refreshTooltip,
-                onRefresh: _refresh,
+                onRefresh: showRefreshButton ? _refresh : null,
                 onToTop: showTop ? _toTop : null,
               ),
             ),

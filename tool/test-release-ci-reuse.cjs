@@ -385,14 +385,22 @@ test('rejects mismatched provenance even when the metadata checksum is valid', a
   for (const change of [
     { version: '1.2.5+1' }, { target: 'ios-arm64' }, { sourceRevision: 'b'.repeat(40) },
     { sourceDirty: true }, { flutterVersion: '3.0.0' }, { pubspecLockSha256: 'd'.repeat(64) },
-    { signing: 'temporary-debug-key' },
+    { signing: 'unsigned-requires-signing' },
   ]) {
     await t.test(JSON.stringify(change), async (t) => {
       const expected = await makeAssets(t, ['android-arm64']);
       const name = `BiliSail-${version}-android-arm64.build-info.json`;
       const original = JSON.parse((await readFile(path.join(expected.directory, name), 'utf8')).replace(/^\uFEFF/, ''));
       await writeChecksummed(expected.directory, name, JSON.stringify({ ...original, ...change }));
-      await assert.rejects(verifyReleaseAssets(expected), /provenance|release keystore/);
+      await assert.rejects(verifyReleaseAssets(expected), /provenance|keystore/);
     });
   }
+});
+
+test('accepts the local debug keystore used for Android packages', async (t) => {
+  const expected = await makeAssets(t, ['android-arm64']);
+  const name = `BiliSail-${version}-android-arm64.build-info.json`;
+  const original = JSON.parse((await readFile(path.join(expected.directory, name), 'utf8')).replace(/^\uFEFF/, ''));
+  await writeChecksummed(expected.directory, name, JSON.stringify({ ...original, signing: 'temporary-debug-key' }));
+  await verifyReleaseAssets(expected);
 });

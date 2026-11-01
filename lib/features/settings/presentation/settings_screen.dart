@@ -335,7 +335,12 @@ final class _SettingsCategoryPageState
                             AppThemePreference.system: '跟随系统',
                             AppThemePreference.light: '浅色',
                             AppThemePreference.dark: '深色',
+                            AppThemePreference.amoled: 'AMOLED 纯黑',
                           }, controller.setTheme),
+                          const Text(
+                            '深色使用带蓝灰底的面板分层；AMOLED 纯黑把背景降到纯黑，仅保留面板和描边区分层级，适合 OLED 屏幕。',
+                            style: TextStyle(fontSize: 12),
+                          ),
                           _choices('界面字体', s.font, const {
                             AppFontPreference.harmonyOsSans: 'HarmonyOS Sans',
                             AppFontPreference.system: '系统默认',
@@ -371,6 +376,13 @@ final class _SettingsCategoryPageState
                                     () => controller.setWheelDampingRatio(1.3),
                                   ),
                             child: const Text('恢复默认阻尼比'),
+                          ),
+                          const SizedBox(height: 20),
+                          _toggle(
+                            '列表刷新按钮',
+                            s.showFloatingRefreshButton,
+                            controller.setShowFloatingRefreshButton,
+                            '在首页、热门、搜索等列表右下角显示常驻刷新按钮。关闭后仍可下拉刷新，滚动出现的「顶部」按钮保持不变。',
                           ),
                         ]),
                       if (widget.category == SettingsCategory.shortcuts)

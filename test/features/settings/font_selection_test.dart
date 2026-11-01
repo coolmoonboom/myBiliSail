@@ -18,7 +18,7 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   test('both themes resolve bundled and installed fonts', () {
-    for (final theme in [BiliTheme.light, BiliTheme.dark]) {
+    for (final theme in [BiliTheme.light, BiliTheme.dark, BiliTheme.amoled]) {
       expect(
         theme(font: AppFontPreference.harmonyOsSans)
             .textTheme

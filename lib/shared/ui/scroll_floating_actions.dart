@@ -4,17 +4,21 @@ import 'package:flutter/material.dart';
 final class ScrollFloatingActions extends StatelessWidget {
   const ScrollFloatingActions({
     super.key,
-    required this.onRefresh,
-    required this.refreshTooltip,
+    this.onRefresh,
+    this.refreshTooltip = '刷新列表',
     this.onToTop,
   });
 
-  final VoidCallback onRefresh;
+  /// Null hides the refresh action, e.g. when the user turned the floating
+  /// refresh button off in settings.
+  final VoidCallback? onRefresh;
   final String refreshTooltip;
   final VoidCallback? onToTop;
 
   @override
   Widget build(BuildContext context) {
+    final refresh = onRefresh;
+    if (refresh == null && onToTop == null) return const SizedBox.shrink();
     final colors = Theme.of(context).colorScheme;
     final style = ButtonStyle(
       fixedSize: const WidgetStatePropertyAll(Size.square(48)),
@@ -35,14 +39,17 @@ final class ScrollFloatingActions extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        IconButton(
-          tooltip: refreshTooltip,
-          onPressed: onRefresh,
-          style: style,
-          icon: const Icon(Icons.refresh_rounded, size: 22),
-        ),
+        if (refresh != null)
+          IconButton(
+            tooltip: refreshTooltip,
+            onPressed: refresh,
+            style: style,
+            icon: const Icon(Icons.refresh_rounded, size: 22),
+          )
+        else
+          const SizedBox.shrink(),
         if (onToTop != null) ...[
-          const SizedBox(height: 8),
+          if (refresh != null) const SizedBox(height: 8),
           Tooltip(
             message: '回到顶部',
             child: TextButton(

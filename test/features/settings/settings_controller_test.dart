@@ -367,6 +367,30 @@ void main() {
     expect(visible?.theme, AppThemePreference.dark);
     expect(visible?.danmakuEnabled, isTrue);
   });
+  test('floating refresh toggle applies live and persists', () async {
+    final repository = _DeferredSettingsRepository();
+    final container = ProviderContainer(
+      overrides: [settingsRepositoryProvider.overrideWithValue(repository)],
+    );
+    addTearDown(container.dispose);
+    await container.read(settingsControllerProvider.future);
+    final controller = container.read(settingsControllerProvider.notifier);
+    final write = controller.setShowFloatingRefreshButton(false);
+    expect(
+      container
+          .read(settingsControllerProvider)
+          .requireValue
+          .showFloatingRefreshButton,
+      isFalse,
+    );
+    await Future<void>.delayed(Duration.zero);
+    repository.completeNext();
+    await write;
+    container.invalidate(settingsControllerProvider);
+    final reloaded = await container.read(settingsControllerProvider.future);
+    expect(reloaded.showFloatingRefreshButton, isFalse);
+    expect(repository.writes.single.showFloatingRefreshButton, isFalse);
+  });
   test(
     'public update normalizes composite player preferences and persists them',
     () async {

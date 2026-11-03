@@ -519,3 +519,9 @@ Android 复用既有媒体服务，暂停／换源期间不撤下前台服务，
 **决定（2026-11-03）**：按用户明确选择，Profile 5 必须经过保留 RPU 的色彩转换后输出 SDR 纹理。Android 仅对此源采用软件 HEVC／gpu-next，其他嵌入式后端通过 libplacebo 滤镜转换；根据固定原生库的运行时能力和实际输出检查是否支持，不从平台名称推断。普通视频继续使用原解码路径，不改用户保存的偏好。
 
 转换不可用或输出准备超时时，由通用播放器返回格式不兼容错误；应用会话最多重新解析一次兼容画质／编码，保留位置、播放意图、倍速和音量，并共享启动预算和打开次数上限。Bilibili 画质规则留在应用层；离线内容不请求在线替代源。这不是 HDR／Dolby Vision 透传，软件解码有功耗成本。源码范围、公开样片、Android 真机证据和 Apple／Linux 未验收项见[跨平台验证](validation/dolby-vision-cross-platform-2026-11-03.md)。
+
+## D70：合并上游 1.2.6+4，默认交付目标收敛为 Android arm64
+
+**决定（2026-11-03）**：按用户要求把上游 `CKopoer/BiliSail` 的 `master`（51 个提交，含 `1.2.6+4`、杜比视界映射、音频画质选择、搜索历史与关键词建议、听书睡眠定时、播放器手势与紧凑控制修复）合并进本 fork，合并后的版本记为 `1.2.8+0`。设置项按字段并存：本 fork 的 `showFloatingRefreshButton` 与上游的 `recordSearchHistory` 同时保留，`preferences.v1` 继续单 JSON 快照，不新增表迁移。Android 继续使用 runner 本地 debug keystore（见 [CI/CD 说明](validation/ci-cd.md#android-本地-debug-签名)），发布校验同时接受 `configured-keystore`。
+
+CI 与 Release 的默认目标改为仅 `android-arm64`：新增 `build_all_platforms`（默认关闭）并把 `enable_windows`／`enable_macos`／`enable_ios`／`enable_linux` 默认置为 `false`，其他平台的 runner、脚本、产物命名与校验规则全部保留，按需显式开启。目标集合仍由 `tool/ci-build-plan.ps1` 的 `ENABLE_*` 决定，脚本与检查未改。合并与默认目标的验证边界、以及 `packages/bili_player/pubspec.lock` 中 `ffi` 依赖标记的修正见 [CI/CD 说明](validation/ci-cd.md#默认只构建-android-arm642026-11-03)。

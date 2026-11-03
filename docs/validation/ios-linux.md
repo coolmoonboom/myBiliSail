@@ -9,7 +9,7 @@
 | `ios-arm64` | `macos-15` / Apple Silicon / Xcode / CocoaPods | iOS 15，iPhoneOS arm64 | `BiliSail-<version>-ios-arm64-unsigned.ipa` |
 | `linux-x64` | `ubuntu-24.04` / GTK 3 / libsecret / libmpv | AppImage 基线 Ubuntu 24.04；Flatpak Freedesktop 25.08；X11／XWayland | `BiliSail-<version>-linux-x64.AppImage` 与 `.flatpak` |
 
-两个平台均复用 [CI](../../.github/workflows/ci.yml) 的并行检查、原生 mux 回归及 [build-release.ps1](../../tool/build-release.ps1)。push／PR 默认构建全部五个平台，手动 CI 和 [Release preview](../../.github/workflows/release.yml) 通过 `enable_ios`、`enable_linux` 分别选择。构建在检查成功后启动，所选目标全部成功才创建 Release 草稿；继续使用 `github.token`，无需增加 GitHub secret。原有 Android、Windows 和 macOS 签名方式沿用现有配置。
+两个平台均复用 [CI](../../.github/workflows/ci.yml) 的并行检查、原生 mux 回归及 [build-release.ps1](../../tool/build-release.ps1)。接入时 push／PR 默认构建全部五个平台，手动 CI 和 [Release preview](../../.github/workflows/release.yml) 通过 `enable_ios`、`enable_linux` 分别选择；2026-11-03 起本 fork 默认只构建 Android arm64，这两个平台改为需显式勾选，见 [CI/CD 说明](ci-cd.md#默认只构建-android-arm642026-11-03)。构建在检查成功后启动，所选目标全部成功才创建 Release 草稿；继续使用 `github.token`，无需增加 GitHub secret。原有 Android、Windows 和 macOS 签名方式沿用现有配置。
 
 每个目标保留 `.build-info.json`、SHA-256 文件和 `.mux-source.zip`；Actions artifact 保留 14 天。Release 不自动公开，旧 Release 不会自动补上新增包。
 

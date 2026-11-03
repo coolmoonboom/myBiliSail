@@ -102,7 +102,7 @@ BiliSail（哔帆）以视频、影视和直播观看为核心，提供双／多
 | Linux x64 | [Flatpak](https://github.com/coolmoonboom/myBiliSail/releases/download/v1.2.7%2B1/BiliSail-1.2.7%2B1-linux-x64.flatpak) / [AppImage](https://github.com/coolmoonboom/myBiliSail/releases/download/v1.2.7%2B1/BiliSail-1.2.7%2B1-linux-x64.AppImage) | Flatpak 通过 `flatpak install --user 文件.flatpak` 安装；AppImage 赋予执行权限后运行。运行库、密钥环及沙盒说明见[平台扩展记录](docs/validation/ios-linux.md) |
 <!-- release-downloads:end -->
 
-GitHub Actions 的 **CI** 执行根应用和四个包的检查，并按平台构建预览产物；维护者可手动运行 **Release preview** 创建预览 Release 草稿，再公开发布。Release 和 CI 构建包的签名种类以各自的 `build-info.json` 为准。触发方式、产物校验与签名配置见 [CI/CD 说明](docs/validation/ci-cd.md)。
+GitHub Actions 的 **CI** 执行根应用和四个包的检查，并默认只构建 Android arm64 预览产物（其他平台在派发时显式勾选）；维护者可手动运行 **Release preview** 创建预览 Release 草稿，再公开发布。Release 和 CI 构建包的签名种类以各自的 `build-info.json` 为准。触发方式、产物校验与签名配置见 [CI/CD 说明](docs/validation/ci-cd.md)。
 
 CI 和 Release 构建的 Windows 产物同时包含 `.msix`、`.msi` 和 `.exe` 安装包，均附 SHA-256；MSI 与 EXE 使用同一安装链，任选一种安装。MSI 向导提供安装目录页，EXE 可通过 **Options → Browse** 选择目录，后续升级默认沿用原目录，详见 [Windows MSI 与 EXE](docs/validation/ci-cd.md#windows-msi-与-exe)。已发布版本的文件不会因工作流修改而自动补齐。
 

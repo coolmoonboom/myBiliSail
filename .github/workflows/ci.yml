@@ -10,25 +10,29 @@ on:
         description: '版本 x.y.z+N（留空使用 pubspec.yaml）'
         type: string
         default: ''
+      build_all_platforms:
+        description: '构建全部平台（默认只构建 Android arm64）'
+        type: boolean
+        default: false
       enable_android:
         type: boolean
         default: true
       enable_windows:
         description: Windows x64 MSIX / MSI / EXE 安装包
         type: boolean
-        default: true
+        default: false
       enable_macos:
         description: macOS arm64 / Intel x64 DMG 安装文件
         type: boolean
-        default: true
+        default: false
       enable_ios:
         description: iOS arm64 unsigned IPA
         type: boolean
-        default: true
+        default: false
       enable_linux:
         description: Linux x64 Flatpak / AppImage
         type: boolean
-        default: true
+        default: false
   workflow_call:
     inputs:
       version:
@@ -39,25 +43,31 @@ on:
         description: 'Optional JSON array limiting builds to a subset of the enabled platform targets.'
         type: string
         default: ''
+      build_all_platforms:
+        description: 'Build every supported target; otherwise only the targets enabled below.'
+        type: boolean
+        default: false
+      # This fork distributes Android arm64; the other targets stay opt-in so a
+      # push or a preview never spends runner minutes on undistributed builds.
       enable_android:
         type: boolean
         default: true
       enable_windows:
         description: Windows x64 MSIX / MSI / EXE installers.
         type: boolean
-        default: true
+        default: false
       enable_macos:
         description: macOS arm64 / Intel x64 DMG installers.
         type: boolean
-        default: true
+        default: false
       enable_ios:
         description: iOS arm64 unsigned IPA (requires signing before installation).
         type: boolean
-        default: true
+        default: false
       enable_linux:
         description: Linux x64 Flatpak / AppImage.
         type: boolean
-        default: true
+        default: false
     secrets:
       # Android packages are signed with the local debug keystore in this
       # fork, so no Android signing secret is accepted or required.
@@ -94,12 +104,14 @@ jobs:
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
           BUILD_TARGETS: ${{ inputs.build_targets }}
-          # Push/PR has no inputs; a reusable caller can explicitly pass false.
-          ENABLE_ANDROID: ${{ !contains(toJSON(inputs), '"enable_android"') || inputs.enable_android }}
-          ENABLE_WINDOWS: ${{ !contains(toJSON(inputs), '"enable_windows"') || inputs.enable_windows }}
-          ENABLE_MACOS: ${{ !contains(toJSON(inputs), '"enable_macos"') || inputs.enable_macos }}
-          ENABLE_IOS: ${{ !contains(toJSON(inputs), '"enable_ios"') || inputs.enable_ios }}
-          ENABLE_LINUX: ${{ !contains(toJSON(inputs), '"enable_linux"') || inputs.enable_linux }}
+          # Push/PR carries no inputs, so only the default Android arm64 build
+          # runs. Callers opt another target in per target, or build everything
+          # with build_all_platforms.
+          ENABLE_ANDROID: ${{ !contains(toJSON(inputs), '"enable_android"') || inputs.enable_android || inputs.build_all_platforms }}
+          ENABLE_WINDOWS: ${{ contains(toJSON(inputs), '"enable_windows"') && inputs.enable_windows || inputs.build_all_platforms }}
+          ENABLE_MACOS: ${{ contains(toJSON(inputs), '"enable_macos"') && inputs.enable_macos || inputs.build_all_platforms }}
+          ENABLE_IOS: ${{ contains(toJSON(inputs), '"enable_ios"') && inputs.enable_ios || inputs.build_all_platforms }}
+          ENABLE_LINUX: ${{ contains(toJSON(inputs), '"enable_linux"') && inputs.enable_linux || inputs.build_all_platforms }}
         run: ./tool/ci-build-plan.ps1
 
   lint:

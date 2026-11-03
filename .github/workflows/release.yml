@@ -12,6 +12,10 @@ on:
         description: '按平台复用同提交、同版本的已完成 CI 构建，仅构建缺少的目标'
         type: boolean
         default: false
+      build_all_platforms:
+        description: '发布全部平台（默认只发布 Android arm64）'
+        type: boolean
+        default: false
       enable_android:
         description: Android arm64 APK
         type: boolean
@@ -19,19 +23,19 @@ on:
       enable_windows:
         description: Windows x64 MSIX / MSI / EXE 安装包
         type: boolean
-        default: true
+        default: false
       enable_macos:
         description: macOS arm64 / Intel x64 DMG 安装文件
         type: boolean
-        default: true
+        default: false
       enable_ios:
         description: iOS arm64 未签名 IPA（安装前需自行签名）
         type: boolean
-        default: true
+        default: false
       enable_linux:
         description: Linux x64 Flatpak / AppImage
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: read
@@ -63,11 +67,12 @@ jobs:
         shell: pwsh
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
-          ENABLE_ANDROID: ${{ inputs.enable_android }}
-          ENABLE_WINDOWS: ${{ inputs.enable_windows }}
-          ENABLE_MACOS: ${{ inputs.enable_macos }}
-          ENABLE_IOS: ${{ inputs.enable_ios }}
-          ENABLE_LINUX: ${{ inputs.enable_linux }}
+          BUILD_ALL_PLATFORMS: ${{ inputs.build_all_platforms }}
+          ENABLE_ANDROID: ${{ inputs.enable_android || inputs.build_all_platforms }}
+          ENABLE_WINDOWS: ${{ inputs.enable_windows || inputs.build_all_platforms }}
+          ENABLE_MACOS: ${{ inputs.enable_macos || inputs.build_all_platforms }}
+          ENABLE_IOS: ${{ inputs.enable_ios || inputs.build_all_platforms }}
+          ENABLE_LINUX: ${{ inputs.enable_linux || inputs.build_all_platforms }}
         run: ./tool/ci-build-plan.ps1
       - name: Plan reused packages and missing platform builds
         id: reuse
@@ -102,6 +107,7 @@ jobs:
     with:
       version: ${{ needs.prepare.outputs.version }}
       build_targets: ${{ needs.prepare.outputs.build_targets }}
+      build_all_platforms: ${{ inputs.build_all_platforms }}
       enable_android: ${{ inputs.enable_android }}
       enable_windows: ${{ inputs.enable_windows }}
       enable_macos: ${{ inputs.enable_macos }}
@@ -206,7 +212,7 @@ jobs:
 
           - 源码提交：$env:GITHUB_SHA
           - Flutter 3.47.6；各平台 SDK、签名信息及 mux 源码归档见 [Actions 构建记录]($env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID) 中所列的来源构建产物。
-          - 仅包含本次选中的平台；包旁附 SHA-256 校验文件。
+          - 仅包含本次勾选的平台；本 fork 默认只勾选 Android arm64，其余平台需派发时显式勾选或选择 发布全部平台；包旁附 SHA-256 校验文件。
           - Windows 同时提供 MSIX、MSI 和 EXE 安装包；EXE 内嵌同一 MSI，任选一种安装。MSI 向导可选择安装目录，EXE 通过 Options → Browse 选择，升级默认沿用原目录。三者复用同一签名证书，测试签名需先信任包旁的 .cer。
           - Android 复用仓库配置的固定 release keystore；macOS 仅 ad-hoc 签名，未 notarize。
           - macOS 分别提供 Apple Silicon arm64 与 Intel x64 DMG，按芯片选择；打开后将 BiliSail.app 拖到 Applications 安装。

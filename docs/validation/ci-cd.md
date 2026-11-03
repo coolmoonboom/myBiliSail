@@ -1,11 +1,11 @@
 # GitHub Actions CI/CD 与安装包
 
-更新日期：2026-11-02。配置覆盖 Android arm64、Windows x64、macOS arm64／Intel x64、iOS arm64、Linux x64；iOS／Linux 的远端构建进展与设备未验项详见[接入记录](ios-linux.md)，Intel macOS 的新增配置与验证边界见下文。本地验证结果与远端、设备未测项分别记录。此流程交付预览构建，不表示各平台验收或 M5 正式发行完成。
+更新日期：2026-11-03。配置覆盖 Android arm64、Windows x64、macOS arm64／Intel x64、iOS arm64、Linux x64，但自 2026-11-03 起本 fork 的默认目标只有 Android arm64，其余平台需显式勾选，见[默认只构建 Android arm64](#默认只构建-android-arm642026-11-03)；iOS／Linux 的远端构建进展与设备未验项详见[接入记录](ios-linux.md)，Intel macOS 的新增配置与验证边界见下文。本地验证结果与远端、设备未测项分别记录。此流程交付预览构建，不表示各平台验收或 M5 正式发行完成。
 
 ## 入口与分工
 
-- [CI](../../.github/workflows/ci.yml)：替换原来的 `windows.yml`；分支 push、PR、手动运行时执行检查及构建，也供 Release 复用。
-- [Release preview](../../.github/workflows/release.yml)：在 Actions 页面手动运行；可选择五个平台，并可按目标复用同提交、同版本且已通过检查与构建的 CI 产物，只补建缺少的目标。全部所选构建通过后，将完整产物汇总上传为单个 Actions ZIP artifact，再创建 **draft + prerelease** 并上传包、签名公钥证书、校验文件与第三方说明。不会自动公开发布。
+- [CI](../../.github/workflows/ci.yml)：替换原来的 `windows.yml`；分支 push、PR、手动运行时执行检查及构建，也供 Release 复用。检查和测试始终全量执行，构建目标默认只有 `android-arm64`。
+- [Release preview](../../.github/workflows/release.yml)：在 Actions 页面手动运行；默认只勾选 Android arm64，其余四个平台需显式勾选或使用 发布全部平台；也可按目标复用同提交、同版本且已通过检查与构建的 CI 产物，只补建缺少的目标。全部所选构建通过后，将完整产物汇总上传为单个 Actions ZIP artifact，再创建 **draft + prerelease** 并上传包、签名公钥证书、校验文件与第三方说明。不会自动公开发布。
 - [检查脚本](../../tool/check.ps1)：本地默认检查根应用和四个独立包；CI 在 Ubuntu 使用 PowerShell 7，分别执行 `Lint`、两份 `RootTests` 分片和 `PackageTests`。格式检查覆盖根应用与各包，根分析统一扫描子包，故分析前仍安装所有包的开发依赖。`-EnforceLockfile` 要求 pub 使用提交的锁文件及内容哈希。
 - [构建打包脚本](../../tool/build-release.ps1)：各平台使用对应主机生成预览包，缺文件、原生命令失败、签名失败立即停止。已有同目标输出目录时拒绝覆盖，重新本地构建前先将其移走。
 
@@ -142,6 +142,14 @@ Release 草稿及全部附件上传成功后，使用 GitHub 官方 [actions/git
 [CI 41323620524](https://github.com/CKopoer/BiliSail/actions/runs/41323620524/job/124901479137) 只有 Intel macOS job 失败：Release 编译及签名已完成，两轮播放窗 Space 检查通过后，启动探测超时；其他五个平台与所有检查通过。线程采样定位到 AppKit 应用激活／WindowServer 与虚拟 GPU 等待。共享窗口激活现在仅在应用未激活时请求 `NSApp.activate`，并补充窗口再激活和回收阶段记录；完整证据、修复范围及本机验证边界见[启动专项](macos-release-startup.md#2026-11-02intel-重复应用激活与图形等待)。原有发布验收与超时门槛继续保留，新的 Intel 原生运行结果仍待对应 CI 复验。
 
 后续 [CI 41436650047](https://github.com/CKopoer/BiliSail/actions/runs/41436650047/job/125252164120) 仍在第二轮窗口回收时耗尽 60 秒总预算；上一次成功运行的同类回收单次就耗时约 30.8 秒。本轮将共享校验入口的组合 GUI `startup` 预算独立设为 180 秒，凭据执行仍为 60 秒，原生启动仍为 180 秒；保留完整断言和独立硬超时，不自动重试。两份工作流的构建步骤／job 上限继续为 30／40 分钟。证据、父进程与 worker 预算传递及远端验证边界见[组合 GUI 执行预算](macos-release-startup.md#2026-11-02组合-gui-检查的执行预算)。
+
+## 默认只构建 Android arm64（2026-11-03）
+
+合并上游 `1.2.6+4` 后，本 fork 的交付范围收敛为 Android arm64：push、PR、手动 CI 与 Release 派发的默认目标都只有 `android-arm64`，Windows、macOS（arm64／Intel）、iOS、Linux 的构建与产物仍然保留，但要显式勾选对应的 `enable_*` 开关，或在两份工作流里选择“构建／发布全部平台”。检查阶段（格式、静态分析、根应用分片测试、四包测试与 mux 原生回归）不受影响，仍覆盖全部四个包与根应用。
+
+实现只在两份工作流的输入层：`ci.yml` 与 `release.yml` 新增 `build_all_platforms`（默认 `false`），`enable_windows`／`enable_macos`／`enable_ios`／`enable_linux` 默认改为 `false`，`enable_android` 保持 `true`；`ci.yml` 的 `prepare` 用 `contains(toJSON(inputs), ...)` 区分“未传输入”（push／PR，此时仅 Android）与“显式传入”（调用方按需开启其他目标）。`tool/ci-build-plan.ps1` 的目标集合仍完全由 `ENABLE_*` 环境变量决定，未做任何修改，因此 `tool/test-ci-build-plan.ps1` 的 117 项组合检查继续适用，产物命名、版本换算与 `tool/release-ci-reuse.cjs` 的校验规则也保持不变。
+
+本轮本机验证：两份工作流经 Python `yaml.safe_load` 解析通过，`node --test tool/test-release-ci-reuse.cjs` 61 项中 60 项通过（余下 1 项仍因本机缺少 `pwsh` 未执行），根应用与各包 `flutter analyze`／`dart analyze` 无问题，`packages/bili_api` 546 项测试、`test/features/settings` 与 `test/features/search` 325 项测试通过，合并后的五份锁文件除 `packages/bili_player/pubspec.lock` 外与上游一致——上游提交的该锁文件把直接依赖 `ffi` 记为 `transitive`，本机 Flutter 3.47.6 重新解析后写回 `direct main`。`tool/check.ps1`、`tool/test-ci-build-plan.ps1` 与改动后的默认目标未在本机执行（缺少 `pwsh`），云端 Android-only 流水线的实际产物以推送后的 CI 运行记录为准。
 
 ## Android 本地 debug 签名
 

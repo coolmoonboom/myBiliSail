@@ -91,6 +91,7 @@ class SqliteSettingsRepository implements SettingsRepository {
       allowConcurrentPlayback: boolean('allowConcurrentPlayback', false),
       cacheImages: boolean('cacheImages', true),
       showFloatingRefreshButton: boolean('showFloatingRefreshButton', true),
+      recordSearchHistory: boolean('recordSearchHistory', true),
       checkPrereleaseUpdates: boolean('checkPrereleaseUpdates', false),
       wheelDampingRatio: number('wheelDampingRatio', 1.3),
       systemFontFamily: decoded['systemFontFamily'] is String
@@ -116,6 +117,16 @@ class SqliteSettingsRepository implements SettingsRepository {
           AppIconPreference.bilisail,
       danmakuEnabled: boolean('danmakuEnabled', true),
       danmakuOpacity: number('danmakuOpacity', 0.8),
+      danmakuSendStyle: (
+        mode: switch (decoded['danmakuSendMode']) {
+          final int mode => mode,
+          _ => 1,
+        },
+        color: switch (decoded['danmakuSendColor']) {
+          final int color => color,
+          _ => 0xffffff,
+        },
+      ),
       danmakuFontScale: danmakuFontScale.isFinite
           ? danmakuFontScale
           : defaultDanmakuFontScale,
@@ -138,9 +149,10 @@ class SqliteSettingsRepository implements SettingsRepository {
               .where((item) => item.name == decoded['playerControlsMode'])
               .firstOrNull ??
           defaultPlayerControlsMode,
-      preferredQuality: number('preferredQuality', 80.0).isFinite
-          ? number('preferredQuality', 80.0).toInt()
-          : 80,
+      preferredQuality: switch (decoded['preferredQuality']) {
+        final int quality => quality,
+        _ => 80,
+      },
       preferredLiveQuality: switch (decoded['preferredLiveQuality']) {
         final int quality => quality,
         _ => 10000,
@@ -234,7 +246,7 @@ class SqliteSettingsRepository implements SettingsRepository {
     return database.writeSetting(
       'preferences.v1',
       jsonEncode({
-        'schemaVersion': 34,
+        'schemaVersion': 35,
         'appIcon': value.appIcon.name,
         'recommendations': value.recommendations.toJson(),
         'navigationBarMode': value.navigationBarMode.name,
@@ -245,6 +257,7 @@ class SqliteSettingsRepository implements SettingsRepository {
         'allowConcurrentPlayback': value.allowConcurrentPlayback,
         'cacheImages': value.cacheImages,
         'showFloatingRefreshButton': value.showFloatingRefreshButton,
+        'recordSearchHistory': value.recordSearchHistory,
         'checkPrereleaseUpdates': value.checkPrereleaseUpdates,
         'wheelDampingRatio': value.wheelDampingRatio,
         'shortcuts': value.shortcuts.toJson(),
@@ -254,6 +267,8 @@ class SqliteSettingsRepository implements SettingsRepository {
         'danmakuSystemFontFamily': value.danmakuSystemFontFamily,
         'danmakuEnabled': value.danmakuEnabled,
         'danmakuOpacity': value.danmakuOpacity,
+        'danmakuSendMode': value.danmakuSendStyle.mode,
+        'danmakuSendColor': value.danmakuSendStyle.color,
         'danmakuFontScale': value.danmakuFontScale,
         'autoPlay': value.autoPlay,
         'defaultShowComments': value.defaultShowComments,

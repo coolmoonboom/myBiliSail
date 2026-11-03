@@ -1,4 +1,5 @@
 import 'media_command_pump.dart';
+import 'listening_sleep_timer.dart';
 
 import 'dart:async';
 
@@ -45,6 +46,7 @@ class PlaybackSession extends ChangeNotifier {
     int Function()? sessionEpoch,
     Duration Function()? historyNow,
     Duration Function()? danmakuNow,
+    DateTime Function()? sleepTimerNow,
     this.startupNow,
     PlaybackRateMemory? rateMemory,
     PlaybackVolumeMemory? volumeMemory,
@@ -54,6 +56,26 @@ class PlaybackSession extends ChangeNotifier {
        _rateMemory = rateMemory ?? PlaybackRateMemory(),
        _volumeMemory = volumeMemory ?? PlaybackVolumeMemory() {
     _clock.start();
+    sleepTimer = ListeningSleepTimer(
+      now: sleepTimerNow,
+      onElapsed: () {
+        if (_disposed || _closing || !_audioOnly) return;
+        final next = _nextSourceIntent;
+        if (next != null) {
+          // A related-video route can mount after the alarm. Keep its listening
+          // identity while revoking the already accepted autoplay request.
+          _nextSourceIntent = (
+            id: next.id,
+            cid: next.cid,
+            playing: false,
+            position: next.position,
+            scope: next.scope,
+            epoch: next.epoch,
+          );
+        }
+        unawaited(pause());
+      },
+    );
     final history = historyRepository;
     _historyReporter = history == null
         ? null
@@ -147,6 +169,7 @@ class PlaybackSession extends ChangeNotifier {
   final _clock = Stopwatch();
   final Duration Function()? startupNow;
   _PlaybackStartupRecovery? _audioRecovery;
+  AudioQualityPreference? _audioQuality;
 
   bool _scheduleRecovery(PlayerFailure failure, {Duration? remaining}) {
     if (_disposed ||
@@ -324,9 +347,18 @@ class PlaybackSession extends ChangeNotifier {
   bool get isLive => contentTarget is LivePlaybackTarget;
   bool _audioOnly = false;
   bool _foregroundAudioOnly = false;
+  bool _allowColorFallback = true;
   bool get audioOnly => _audioOnly;
+  late final ListeningSleepTimer sleepTimer;
+  bool get canAutoAdvance => !sleepTimer.elapsed;
+
+  void startSleepTimer(Duration duration) {
+    if (_disposed || _closing || !_audioOnly || !sourceMatchesAccount) return;
+    sleepTimer.start(duration);
+  }
+
   bool get continuousRelatedPlaybackEnabled =>
-      _settings.continuousRelatedPlayback;
+      _settings.continuousRelatedPlayback && canAutoAdvance;
   bool get canListen =>
       !isLive &&
       media?.kind == PlaybackMediaKind.dash &&
@@ -479,7 +511,9 @@ class PlaybackSession extends ChangeNotifier {
         part?.cid != cid ||
         _scope != accountScope() ||
         _epoch != sessionEpoch() ||
-        (completed && snapshots.value.phase != PlaybackPhase.ended)) {
+        (completed &&
+            (!canAutoAdvance ||
+                snapshots.value.phase != PlaybackPhase.ended))) {
       return false;
     }
     _nextSourceIntent = (
@@ -543,6 +577,7 @@ class PlaybackSession extends ChangeNotifier {
       desiredPlaying: _desiredPlaying,
       subtitleLabel: _subtitlePreference,
       voice: _voice,
+      audioQuality: _audioQuality,
       audioOnly: _foregroundAudioOnly,
     );
     _checkpoints[owner] = checkpoint;
@@ -648,6 +683,7 @@ class PlaybackSession extends ChangeNotifier {
       target: target,
       title: title,
       voice: restored?.voice ?? const PlaybackVoice.original(),
+      audioQuality: restored?.audioQuality,
       audioOnly: nextPlaying != null
           ? _foregroundAudioOnly
           : restored?.audioOnly ??
@@ -750,9 +786,46 @@ class PlaybackSession extends ChangeNotifier {
     ContentPlaybackTarget? target,
     String? title,
     PlaybackVoice? voice,
+    AudioQualityPreference? audioQuality,
     int? liveLine,
     LiveStreamPreference? liveStream,
     bool? audioOnly,
+  }) => _open(
+    video,
+    selected,
+    quality: quality,
+    force: force,
+    position: position,
+    desiredPlaying: desiredPlaying,
+    rate: rate,
+    volume: volume,
+    target: target,
+    title: title,
+    voice: voice,
+    audioQuality: audioQuality,
+    liveLine: liveLine,
+    liveStream: liveStream,
+    audioOnly: audioOnly,
+  );
+
+  Future<void> _open(
+    VideoDetail? video,
+    VideoPart? selected, {
+    int quality = 80,
+    bool force = false,
+    Duration? position,
+    bool? desiredPlaying,
+    double? rate,
+    double? volume,
+    ContentPlaybackTarget? target,
+    String? title,
+    PlaybackVoice? voice,
+    AudioQualityPreference? audioQuality,
+    int? liveLine,
+    LiveStreamPreference? liveStream,
+    bool? audioOnly,
+    bool allowColorFallback = true,
+    Duration? startupBudget,
   }) async {
     if (_disposed || _closing) return;
     if (target == null && (video == null || selected == null)) return;
@@ -767,17 +840,25 @@ class PlaybackSession extends ChangeNotifier {
     final generation = ++_generation;
     _cancelRecovery();
     if (_recoveryGeneration != generation) {
-      _recoveryAttempts = 0;
-      _nativeOpenAttempts = 0;
-      _remainingRecoveryBudget = _PlaybackStartupRecovery.totalBudget;
+      if (startupBudget == null) {
+        _recoveryAttempts = 0;
+        _nativeOpenAttempts = 0;
+      }
+      _remainingRecoveryBudget =
+          startupBudget ?? _PlaybackStartupRecovery.totalBudget;
     }
     _foregroundAudioOnly = audioOnly ?? _foregroundAudioOnly;
+    _allowColorFallback = allowColorFallback;
     final requestedAudioOnly = _foregroundAudioOnly;
     _audioOnly = requestedAudioOnly;
+    if (!requestedAudioOnly) sleepTimer.cancel();
+    sleepTimer.checkDeadline();
     _audioRecovery = null;
     // Capture source settings together; a preference change during resolution
     // applies to the next open rather than half of this source generation.
-    final preferredCodec = _settings.preferredVideoCodec;
+    final preferredCodec = allowColorFallback
+        ? _settings.preferredVideoCodec
+        : VideoCodecPreference.h264;
     final mediaCdn = _settings.mediaCdn;
     final videoDecoding = switch (_settings.videoDecoding) {
       VideoDecodingPreference.automatic => VideoDecodingMode.automatic,
@@ -815,6 +896,8 @@ class PlaybackSession extends ChangeNotifier {
         detail?.summary.id == video?.summary.id &&
         part?.cid == selected?.cid &&
         contentTarget == target;
+    _audioQuality = audioQuality ?? (samePart ? _audioQuality : null);
+    final requestedAudioQuality = _audioQuality;
     final requestedLiveLine = target is LivePlaybackTarget
         ? liveLine ?? (samePart ? _liveLine : 0)
         : 0;
@@ -834,6 +917,7 @@ class PlaybackSession extends ChangeNotifier {
       _desiredPlaying = true;
       _subtitlePreference = null;
     }
+    if (sleepTimer.elapsed) _desiredPlaying = false;
     final oldRate =
         rate ??
         (samePart && media != null
@@ -881,6 +965,7 @@ class PlaybackSession extends ChangeNotifier {
     danmaku.replaceEvents(const []);
     _notify();
     _PlaybackStartupRecovery? preparingRecovery;
+    PlaybackMedia? compatibilityMedia;
     try {
       await savedProgress;
       if (!isCurrent()) return;
@@ -957,7 +1042,10 @@ class PlaybackSession extends ChangeNotifier {
       await Future.wait<void>([
         stopped,
         resolution.then<void>((value) {
-          resolved = value;
+          resolved = requestedAudioQuality == null
+              ? value
+              : value.selectAudioQuality(requestedAudioQuality);
+          compatibilityMedia = resolved;
         }),
         if (readResume)
           startupDiagnostics
@@ -1119,6 +1207,7 @@ class PlaybackSession extends ChangeNotifier {
                           resolved.kind == PlaybackMediaKind.progressive
                     ? ProgressiveSource(
                         MediaTrack(uri: videoUri, requestPolicy: policy),
+                        isLive: isLive,
                       )
                     : DashPairSource(
                         video: MediaTrack(
@@ -1169,6 +1258,11 @@ class PlaybackSession extends ChangeNotifier {
         _audioRecovery = recovery;
       }
       media = resolved;
+      if (requestedAudioQuality != null &&
+          resolved.audioTracks.isNotEmpty &&
+          resolved.audioQuality != requestedAudioQuality) {
+        auxiliaryMessage = '所选音质当前不可用，已使用可用音轨';
+      }
       if (isLive) {
         _liveLine = openedLiveLine;
         if (!requestedLiveStream.isAutomatic &&
@@ -1231,7 +1325,55 @@ class PlaybackSession extends ChangeNotifier {
       }
     } on PlayerFailure catch (failure) {
       if (isCurrent()) {
-        error = contentTarget is OfflinePlaybackTarget
+        if (failure.kind == PlayerFailureKind.unsupportedVideoColor &&
+            allowColorFallback &&
+            !isLive &&
+            target is! OfflinePlaybackTarget) {
+          final original = compatibilityMedia;
+          final candidates =
+              original?.qualities
+                  .where(
+                    (candidate) =>
+                        candidate != 126 &&
+                        candidate > 0 &&
+                        candidate <= original.quality,
+                  )
+                  .toList()
+                ?..sort((a, b) => b.compareTo(a));
+          final fallbackQuality =
+              candidates?.firstOrNull ?? (quality < 80 ? quality : 80);
+          final fallbackGeneration = _generation + 1;
+          await _open(
+            video,
+            selected,
+            quality: fallbackQuality,
+            force: true,
+            position: _openingPosition ?? position,
+            desiredPlaying: _desiredPlaying,
+            rate: _openingRate,
+            volume: _openingVolume,
+            target: target,
+            title: title,
+            voice: _voice,
+            audioQuality: requestedAudioQuality,
+            audioOnly: requestedAudioOnly,
+            allowColorFallback: false,
+            startupBudget:
+                preparingRecovery?.totalRemaining ?? _remainingRecoveryBudget,
+          );
+          if (!_disposed &&
+              _generation == fallbackGeneration &&
+              error == null) {
+            auxiliaryMessage = '当前设备无法正确显示所选视频格式，已使用兼容视频流';
+            _notify();
+          }
+          return;
+        }
+        error = failure.kind == PlayerFailureKind.unsupportedVideoColor
+            ? target is OfflinePlaybackTarget
+                  ? '当前设备无法正确显示此离线视频的杜比视界格式'
+                  : '当前设备无法正确显示此视频格式，未取得兼容视频流'
+            : contentTarget is OfflinePlaybackTarget
             ? '无法播放本地视频，文件可能无法解码或已不可访问'
             : failure.message;
         _resolving = false;
@@ -1258,6 +1400,7 @@ class PlaybackSession extends ChangeNotifier {
     if (_disposed || value.generation != engine.currentSnapshot.generation) {
       return;
     }
+    sleepTimer.checkDeadline();
     final previous = snapshots.value;
     if (value.generation == previous.generation &&
         value.phase == PlaybackPhase.playing &&
@@ -1566,6 +1709,9 @@ class PlaybackSession extends ChangeNotifier {
   void configureSettings(AppSettings settings) {
     final previous = _settings;
     _settings = settings.normalized();
+    if (previous.danmakuSendStyle != _settings.danmakuSendStyle) {
+      setDanmakuSendStyle(_settings.danmakuSendStyle);
+    }
     _volumeMemory.configure(
       enabled: _settings.rememberVolumeGlobally,
       defaultVolume: _settings.defaultVolume,
@@ -2177,6 +2323,10 @@ class PlaybackSession extends ChangeNotifier {
   }
 
   Future<void> togglePlaying() async {
+    if (!_desiredPlaying || snapshots.value.phase == PlaybackPhase.ended) {
+      sleepTimer.checkDeadline();
+      sleepTimer.acknowledgeElapsed();
+    }
     if (snapshots.value.phase == PlaybackPhase.ended && !_resolving) {
       if (isLive) {
         _desiredPlaying = true;
@@ -2215,6 +2365,8 @@ class PlaybackSession extends ChangeNotifier {
   /// Idempotent system play commands must never toggle a playing source off.
   Future<void> play() async {
     if (_disposed || _closing) return;
+    sleepTimer.checkDeadline();
+    sleepTimer.acknowledgeElapsed();
     if (error != null && !_resolving) {
       _desiredPlaying = true;
       await retry();
@@ -2337,6 +2489,8 @@ class PlaybackSession extends ChangeNotifier {
       _,
     ) async {
       if (_disposed || generation != _generation) return;
+      sleepTimer.checkDeadline();
+      if (sleepTimer.elapsed) _desiredPlaying = false;
       if (!_playbackAllowed) {
         if (engine.currentSnapshot.desiredPlaying ||
             engine.currentSnapshot.phase == PlaybackPhase.playing) {
@@ -2446,7 +2600,7 @@ class PlaybackSession extends ChangeNotifier {
     final revision = ++_temporaryRateRevision;
     return _serializeRate(() async {
       if (revision != _temporaryRateRevision) return;
-      await _command(() => engine.setRate(rate));
+      await _command(() => _setEngineRate(rate));
     });
   }
 
@@ -2467,7 +2621,13 @@ class PlaybackSession extends ChangeNotifier {
 
   Future<void> _applyRate(double rate) => isLive
       ? Future.value()
-      : _serializeRate(() => _command(() => engine.setRate(rate)));
+      : _serializeRate(() => _command(() => _setEngineRate(rate)));
+
+  Future<void> _setEngineRate(double rate) async {
+    // Compare inside the command pump: an in-flight hold may still need to
+    // finish before its restoration target becomes the current native rate.
+    if (engine.currentSnapshot.rate != rate) await engine.setRate(rate);
+  }
 
   Future<void> setRate(double rate) {
     if (isLive || _disposed || _closing) return Future.value();
@@ -2481,7 +2641,7 @@ class PlaybackSession extends ChangeNotifier {
     return _serializeRate(
       () => _command(() async {
         try {
-          await engine.setRate(rate);
+          await _setEngineRate(rate);
           if (_disposed || _closing || generation != _generation) return;
           _rateMemory.remember(rate, revision: memoryRevision);
         } on PlayerFailure {
@@ -2561,6 +2721,33 @@ class PlaybackSession extends ChangeNotifier {
       volume: media == null ? _openingVolume : snapshots.value.volume,
       target: contentTarget,
       title: contentTitle,
+    );
+  }
+
+  Future<void> changeAudioQuality(AudioQualityPreference quality) async {
+    final current = media;
+    if (_disposed ||
+        _closing ||
+        _resolving ||
+        isLive ||
+        current == null ||
+        current.kind != PlaybackMediaKind.dash ||
+        !current.audioTracks.any((option) => option.quality == quality) ||
+        current.audioQuality == quality) {
+      return;
+    }
+    await open(
+      detail,
+      part,
+      target: contentTarget,
+      title: contentTitle,
+      quality: _quality,
+      audioQuality: quality,
+      force: true,
+      position: snapshots.value.position,
+      rate: _temporaryRateOriginal ?? snapshots.value.rate,
+      volume: snapshots.value.volume,
+      desiredPlaying: _desiredPlaying,
     );
   }
 
@@ -2670,7 +2857,7 @@ class PlaybackSession extends ChangeNotifier {
     final video = detail;
     final selected = part;
     if (contentTarget != null || (video != null && selected != null)) {
-      await open(
+      await _open(
         video,
         selected,
         force: true,
@@ -2683,14 +2870,17 @@ class PlaybackSession extends ChangeNotifier {
         desiredPlaying: _desiredPlaying,
         target: contentTarget,
         title: contentTitle,
+        allowColorFallback: _allowColorFallback,
       );
     }
   }
 
   Future<void> stop({bool clearCheckpoints = true}) async {
+    sleepTimer.cancel();
     _cancelRecovery();
     _audioRecovery = null;
     _audioOnly = false;
+    _audioQuality = null;
     _foregroundAudioOnly = false;
     _nextSourceIntent = null;
     if (clearCheckpoints) {
@@ -2768,6 +2958,7 @@ class PlaybackSession extends ChangeNotifier {
     await attempt(engine.dispose);
     await attempt(() async => snapshots.dispose());
     await attempt(() async => highEnergy.dispose());
+    await attempt(() async => sleepTimer.dispose());
     await attempt(() async => danmakuSendStyle.dispose());
     await attempt(() async => danmaku.dispose());
     _clock.stop();
@@ -2839,6 +3030,7 @@ final class _PlaybackCheckpoint {
     this.subtitleLabel,
     this.target,
     this.voice = const PlaybackVoice.original(),
+    this.audioQuality,
     this.audioOnly = false,
   });
   final VideoId? videoId;
@@ -2855,6 +3047,7 @@ final class _PlaybackCheckpoint {
   final bool desiredPlaying;
   final String? subtitleLabel;
   final PlaybackVoice voice;
+  final AudioQualityPreference? audioQuality;
   final bool audioOnly;
 }
 

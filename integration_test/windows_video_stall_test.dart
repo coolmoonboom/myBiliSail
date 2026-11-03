@@ -94,14 +94,25 @@ Future<void> _runBuffering(WidgetTester tester) async {
     }
     expect(engine.currentSnapshot.isBuffering, true);
     final waitingAt = engine.currentSnapshot.position;
-    await tester.pump(const Duration(milliseconds: 500));
+    // A usable TCP connection may be quiet for more than the old 8s failure
+    // threshold. Retain the already loaded pair and recover without a reopen.
+    final generation = engine.currentSnapshot.generation;
+    final nativeWaitingAt = engine.inspectDiagnostics().position;
+    await tester.pump(const Duration(seconds: 9));
     expect(
       (engine.currentSnapshot.position - waitingAt).abs(),
       lessThan(const Duration(milliseconds: 250)),
     );
     expect(failures, isEmpty);
+    expect(
+      (engine.inspectDiagnostics().position - nativeWaitingAt).abs(),
+      lessThan(const Duration(milliseconds: 250)),
+    );
     resume.complete();
-    while (engine.currentSnapshot.position < const Duration(seconds: 6) &&
+    watch.reset();
+    // A backend's position sample can land exactly on six seconds. Keep
+    // waiting until it satisfies the strict progress assertion below.
+    while (engine.currentSnapshot.position <= const Duration(seconds: 6) &&
         watch.elapsed < const Duration(seconds: 10)) {
       await tester.pump(const Duration(milliseconds: 100));
     }
@@ -111,6 +122,7 @@ Future<void> _runBuffering(WidgetTester tester) async {
       greaterThan(const Duration(seconds: 6)),
     );
     expect(failures, isEmpty);
+    expect(engine.currentSnapshot.generation, generation);
     debugPrint(
       'TEMPORARY_VIDEO_BUFFER waitedAtMs=${waitingAt.inMilliseconds} '
       'resumedAtMs=${engine.currentSnapshot.position.inMilliseconds} failures=0',

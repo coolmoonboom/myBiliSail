@@ -107,6 +107,8 @@ final class SettingsController extends AsyncNotifier<AppSettings> {
       update((current) => current.copyWith(cacheImages: value));
   Future<void> setShowFloatingRefreshButton(bool value) =>
       update((current) => current.copyWith(showFloatingRefreshButton: value));
+  Future<void> setRecordSearchHistory(bool value) =>
+      update((current) => current.copyWith(recordSearchHistory: value));
   Future<void> setCheckPrereleaseUpdates(bool value) =>
       update((current) => current.copyWith(checkPrereleaseUpdates: value));
   Future<void> setWheelDampingRatio(double value) =>
@@ -125,6 +127,8 @@ final class SettingsController extends AsyncNotifier<AppSettings> {
       update((current) => current.copyWith(danmakuOpacity: value));
   Future<void> setDanmakuFontScale(double value) =>
       update((current) => current.copyWith(danmakuFontScale: value));
+  Future<void> setDanmakuSendStyle(({int mode, int color}) value) =>
+      update((current) => current.copyWith(danmakuSendStyle: value));
   Future<void> setAutoPlay(bool value) =>
       update((current) => current.copyWith(autoPlay: value));
   Future<void> setDefaultShowComments(bool value) =>

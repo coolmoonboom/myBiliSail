@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:ffi';
 
 import 'package:media_kit/media_kit.dart' as mk;
+import 'package:media_kit/generated/libmpv/bindings.dart' show mpv_event_hook;
+import 'package:ffi/ffi.dart';
 
 import 'native_readiness.dart';
 
@@ -11,10 +13,18 @@ final class NativeLoadState {
   final _changes = StreamController<void>.broadcast(sync: true);
   int? _entryId;
   int? _errorCode;
+  bool _preparationFailed = false;
   bool _disposed = false;
 
   Stream<void> get changes => _changes.stream;
   int? get errorCode => _errorCode;
+  bool get preparationFailed => _preparationFailed;
+
+  void failPreparation() {
+    if (_disposed || _preparationFailed) return;
+    _preparationFailed = true;
+    _changes.add(null);
+  }
 
   void started(int entryId) {
     if (!_disposed) _entryId = entryId;
@@ -52,10 +62,12 @@ final class NativeLoadObserver {
     mk.NativePlayer platform, {
     required bool Function() isCurrent,
     required void Function(int errorCode) onFailure,
+    void Function(String filename)? onExternalAudio,
+    void Function()? onPreloaded,
   }) async {
-    final handle = await platform.handle;
+    final handle = platform.handle;
     if (!isCurrent()) throw const SourceSuperseded();
-    final mpv = platform.mpv;
+    final mpv = mk.NativePlayer.mpv;
     final client = mpv.mpv_create_weak_client(
       Pointer.fromAddress(handle),
       nullptr,
@@ -73,7 +85,26 @@ final class NativeLoadObserver {
         final event = mpv.mpv_wait_event(client, 0).ref;
         if (event.event_id == 0) break;
         if (!isCurrent() || event.data == nullptr) continue;
-        if (event.event_id == 6) {
+        if (event.event_id == 25 && onPreloaded != null) {
+          final hookId = event.data.cast<mpv_event_hook>().ref.id;
+          try {
+            onPreloaded();
+          } on Object {
+            // Do not leak native strings or leave the loading core blocked.
+            state.failPreparation();
+            // Continue the hook for cleanup, without decoding an unsupported
+            // Profile 5 base layer as ordinary YUV in the meantime.
+            platform.setProperty('vid', 'no');
+          } finally {
+            mpv.mpv_hook_continue(client, hookId);
+          }
+        } else if (event.event_id == 22 && onExternalAudio != null) {
+          final property = event.data.cast<_MpvEventProperty>().ref;
+          if (property.format == 1 && property.data != nullptr) {
+            final value = property.data.cast<Pointer<Utf8>>().value;
+            if (value != nullptr) onExternalAudio(value.toDartString());
+          }
+        } else if (event.event_id == 6) {
           state.started(event.data.cast<Int64>().value);
         } else if (event.event_id == 7) {
           final end = event.data.cast<_MpvEndFile>().ref;
@@ -91,6 +122,33 @@ final class NativeLoadObserver {
 
     final wakeup = NativeCallable<Void Function(Pointer<Void>)>.listener(drain);
     try {
+      if (onPreloaded != null) {
+        final name = 'on_preloaded'.toNativeUtf8();
+        try {
+          if (mpv.mpv_hook_add(client, 2, name.cast(), 0) < 0) {
+            throw StateError('Native video preparation hook unavailable.');
+          }
+        } finally {
+          calloc.free(name);
+        }
+      }
+      if (onExternalAudio != null) {
+        final property = 'current-tracks/audio/external-filename'
+            .toNativeUtf8();
+        try {
+          final result = mpv.mpv_observe_property(
+            client,
+            1,
+            property.cast(),
+            1,
+          );
+          if (result < 0) {
+            throw StateError('External audio observation unavailable.');
+          }
+        } finally {
+          calloc.free(property);
+        }
+      }
       mpv.mpv_set_wakeup_callback(client, wakeup.nativeFunction, nullptr);
     } on Object {
       mpv.mpv_destroy(client);
@@ -126,4 +184,12 @@ final class _MpvEndFile extends Struct {
   external int error;
   @Int64()
   external int entryId;
+}
+
+// mpv_event_property layout from the same public client ABI as END_FILE.
+final class _MpvEventProperty extends Struct {
+  external Pointer<Utf8> name;
+  @Int32()
+  external int format;
+  external Pointer<Void> data;
 }

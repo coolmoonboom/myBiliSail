@@ -79,6 +79,14 @@ if ($safe.Count -ne 14 -or ($safe -join "`n") -match 'private|FlutterView|https:
   throw 'macOS smoke diagnostics leaked non-whitelisted output.'
 }
 
+foreach ($stage in @('bind', 'reactivate', 'reactivated', 'unbind', 'geometry', 'detach', 'retire', 'retired')) {
+  $line = "BILISAIL_FOCUS_STAGE:$stage"
+  $diagnostics = @(Get-MacOSSmokeDiagnosticLines "$line`n$line private`n${line}:https://example.invalid/?token=private")
+  if ($diagnostics.Count -ne 1 -or $diagnostics[0] -cne $line) {
+    throw 'macOS playback activation/retirement diagnostics lost a stage or accepted private output.'
+  }
+}
+
 # A synchronously completing reader must yield after bounded chunks even when
 # there is no newline, then discard the entire oversized line before recovery.
 $pipe = @{
@@ -97,6 +105,74 @@ try {
     throw 'A discarded long-line suffix was accepted or the next complete line was lost.'
   }
 } finally { $pipe.reader.Dispose() }
+
+# Execute the packaging call itself with fake native boundaries. Intel must not
+# launch a probe, while static failures still block both packaging modes.
+& {
+  . (Join-Path $PSScriptRoot 'macos-release-validation.ps1')
+  $calls = [System.Collections.Generic.List[string]]::new()
+  $fixtureState = @{ rejectSignature = $false; failStartup = $false }
+  function Confirm-MacOSReleaseSignature([string]$App, [string]$WorkingDirectory) {
+    $calls.Add('signature')
+    if ($fixtureState.rejectSignature) { throw 'Invalid fixture signature.' }
+  }
+  function Invoke-MacOSReleaseSmokePhase([string]$Executable, [string]$Phase, [string]$RunId, [string]$WorkingDirectory) {
+    $calls.Add($Phase)
+    if ($fixtureState.failStartup -and $Phase -eq 'startup') { throw 'Fixture startup failed.' }
+  }
+  $staging = Join-Path ([System.IO.Path]::GetTempPath()) "bilisail-macos-packaging-$([guid]::NewGuid().ToString('N'))"
+  $outputRoot = $staging
+  $app = Join-Path $staging 'BiliSail.app'
+  $executableDirectory = Join-Path $app 'Contents/MacOS'
+  $executable = Join-Path $executableDirectory 'BiliSail'
+  $parseErrors = $null
+  $buildAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'build-release.ps1'), [ref]$null, [ref]$parseErrors)
+  if ($parseErrors.Count) { throw 'Could not parse the production packaging script.' }
+  $validationCalls = @($buildAst.FindAll({ param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Test-MacOSReleaseApp'
+  }, $true))
+  if ($validationCalls.Count -ne 1) { throw 'Expected one shared macOS packaging validation call.' }
+  $validate = [scriptblock]::Create($validationCalls[0].Extent.Text)
+  try {
+    New-Item -ItemType Directory -Path $executableDirectory -Force | Out-Null
+    [System.IO.File]::WriteAllText($executable, 'fixture')
+    $Target = 'macos-x64'
+    $result = & $validate
+    $metadata = $result | ConvertTo-Json | ConvertFrom-Json
+    if (($calls -join ',') -cne 'signature' -or $metadata.signature -cne 'passed' -or
+        $metadata.startup -cne 'skipped' -or $metadata.credentials -cne 'skipped' -or
+        $metadata.runtimeSmokeSkipReason -cne 'disabled-for-build-target') {
+      throw 'Intel packaging ran a probe or misreported skipped runtime validation.'
+    }
+    $calls.Clear()
+    $Target = 'macos-arm64'
+    $result = & $validate
+    if (($calls -join ',') -cne 'signature,startup,write,read-delete,verify-deleted,signature' -or
+        $result.startup -cne 'first-frame-and-3-seconds' -or $result.credentials -eq 'skipped') {
+      throw 'Apple Silicon packaging lost its runtime validation or signature recheck.'
+    }
+    $fixtureState.failStartup = $true
+    $calls.Clear()
+    Assert-Rejected { & $validate }
+    if (($calls -join ',') -cne 'signature,startup,cleanup') { throw 'Runtime failure lost its cleanup or stopped blocking packaging.' }
+    $fixtureState.failStartup = $false
+    foreach ($Target in @('macos-x64', 'macos-arm64')) {
+      $fixtureState.rejectSignature = $true
+      $calls.Clear()
+      Assert-Rejected { & $validate }
+      if (($calls -join ',') -cne 'signature') { throw 'An invalid signature reached runtime validation.' }
+    }
+    $fixtureState.rejectSignature = $false
+    Remove-Item -LiteralPath $executable -Force
+    foreach ($Target in @('macos-x64', 'macos-arm64')) { Assert-Rejected { & $validate } }
+    Write-Output 'macOS packaging validation checks passed (7 cases).'
+  } finally {
+    Remove-Item -LiteralPath $executable -Force -ErrorAction SilentlyContinue
+    foreach ($directory in @((Join-Path $staging 'validation'), $executableDirectory, (Join-Path $app 'Contents'), $app, $staging)) {
+      Remove-Item -LiteralPath $directory -Force -ErrorAction SilentlyContinue
+    }
+  }
+}
 
 # Exercise real child processes: parser-only checks cannot detect conflated
 # launch/probe deadlines, pipe deadlocks or acknowledgements on the wrong pipe.
@@ -166,6 +242,44 @@ try {
       }
     }
   }
+  # Exercise the shipped defaults through the real parent -> worker -> child
+  # boundary. A larger parent limit alone is ineffective if the worker rejects
+  # values above 60 or silently falls back to its old credential-only limit.
+  $budgetCases = @(
+    @{ phase = 'startup'; expected = 180; scenario = 'gui-progress' }
+    @{ phase = 'write'; expected = 60; scenario = 'immediate' }
+    @{ phase = 'read-delete'; expected = 60; scenario = 'immediate' }
+    @{ phase = 'verify-deleted'; expected = 60; scenario = 'immediate' }
+    @{ phase = 'cleanup'; expected = 60; scenario = 'immediate' }
+    @{ phase = 'startup'; expected = 4; scenario = 'gui-progress'; timeout = 4 }
+    @{ phase = 'startup'; expected = 1; scenario = 'gui-progress'; timeout = 1 }
+  )
+  foreach ($case in $budgetCases) {
+    $parameters = @{
+      Executable = $pwsh; Phase = $case.phase; RunId = $runId
+      WorkingDirectory = $smokeTestDirectory; LaunchTimeoutSeconds = 10
+      LauncherArguments = @('-NoProfile', '-File', $processFixture, $case.scenario)
+    }
+    if ($case.ContainsKey('timeout')) { $parameters.TimeoutSeconds = $case.timeout }
+    $failure = $null
+    try { Invoke-MacOSReleaseSmokePhase @parameters } catch { $failure = $_.Exception.Message }
+    $status = Get-Content -LiteralPath (Join-Path $smokeTestDirectory "$($case.phase).result.json") -Raw | ConvertFrom-Json
+    if ($status.probeTimeoutSeconds -ne $case.expected -or $status.supervisorTimedOut -or
+        $status.supervisorTimeoutSeconds -ne 10 + $case.expected + 30) {
+      throw "The '$($case.phase)' budget did not survive the worker boundary."
+    }
+    if ($case.expected -eq 1) {
+      if (!$failure -or !$status.timedOut -or $status.timeoutKind -ne 'probe' -or $status.acknowledged -or
+          'BILISAIL_RELEASE_STAGE:first-frame' -cnotin @($status.stages.stage) -or
+          'BILISAIL_FOCUS_STAGE:retire' -cnotin @($status.stages.stage)) {
+        throw 'GUI progress renewed the fixed total execution deadline.'
+      }
+    } elseif ($failure -or $status.timedOut -or !$status.acknowledged -or !$status.outputDrained -or $status.exitCode -ne 0) {
+      throw "A valid '$($case.phase)' probe failed with its selected budget: $failure"
+    } elseif ($case.phase -eq 'startup' -and @($status.stages | Where-Object { $_.stage -ceq 'BILISAIL_FOCUS_STAGE:retired' }).Count -ne 2) {
+      throw 'The GUI budget probe did not complete both window lifecycles.'
+    }
+  }
   # Observe a real worker's snapshot while its native child is still hung, then
   # end it using the independent parent deadline before the inner 60s timer.
   $start = [System.Diagnostics.ProcessStartInfo]::new()
@@ -214,9 +328,11 @@ try {
     }
     Remove-Item -LiteralPath $fixturePidPath -Force -ErrorAction SilentlyContinue
   }
-  Write-Output "macOS smoke process supervision checks passed ($($scenarios.Count + 1) cases)."
+  Write-Output "macOS smoke process supervision checks passed ($($scenarios.Count + $budgetCases.Count + 1) cases)."
 } finally {
   # Remove only the known fixture output and the directory created above.
-  Remove-Item -LiteralPath (Join-Path $smokeTestDirectory 'verify-deleted.result.json') -Force -ErrorAction SilentlyContinue
+  foreach ($phase in @('startup', 'write', 'read-delete', 'verify-deleted', 'cleanup')) {
+    Remove-Item -LiteralPath (Join-Path $smokeTestDirectory "$phase.result.json") -Force -ErrorAction SilentlyContinue
+  }
   Remove-Item -LiteralPath $smokeTestDirectory -Force
 }

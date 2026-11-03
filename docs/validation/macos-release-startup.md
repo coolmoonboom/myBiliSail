@@ -1,6 +1,6 @@
 # macOS 发布启动与安全存储
 
-日期：2026-10-08；验证更新：2026-10-31。当前配置提供 arm64／Intel x64、ad-hoc 签名、未公证的预览 DMG，两种架构沿用相同发布门槛。[CI #221](https://github.com/CKopoer/BiliSail/actions/runs/40804720827)（代码提交 `64acaa709315b9c91e15c67ae173f56b05689570`）的两种架构均通过构建、签名校验、待打包应用首帧和跨进程合成 Keychain 读写／删除验证，并完成 DMG 打包。设备安装升级、Gatekeeper、真实账号与音画播放仍未验收。
+日期：2026-10-08；验证更新：2026-11-02。当前配置提供 arm64／Intel x64、ad-hoc 签名、未公证的预览 DMG。arm64 保留完整启动／窗口／Keychain smoke；2026-11-02 起按用户要求，x64 仅执行构建、架构、版本、签名、权限、可执行文件和镜像等静态校验，不再将运行 smoke 作为打包门槛，详见下文的 [x64 调整记录](#2026-11-02x64-打包移除运行-smoke)。历史 [CI #221](https://github.com/CKopoer/BiliSail/actions/runs/40804720827)（代码提交 `64acaa709315b9c91e15c67ae173f56b05689570`）的两种架构均完成完整 smoke 和 DMG 打包。设备安装升级、Gatekeeper、真实账号与音画播放仍未验收。
 
 ## 根因与配置
 
@@ -18,22 +18,22 @@ macOS 使用传统系统 Keychain，不降级为明文文件或数据库。Andro
 
 ## 发布门槛
 
-调用链继续为 `release.yml → ci.yml → tool/build-release.ps1`。macOS 分支构建、验证对应的 arm64／x86_64 架构、使用 `ditto` 复制后，直接运行待打包 bundle。没有另编译测试应用，也没有通过重新签名规避检查。[验证辅助脚本](../../tool/macos-release-validation.ps1) 执行：
+调用链继续为 `release.yml → ci.yml → tool/build-release.ps1`。macOS 分支构建、验证对应的 arm64／x86_64 架构、使用 `ditto` 复制后，由 [验证辅助脚本](../../tool/macos-release-validation.ps1) 检查待打包 bundle。下面的完整运行流程适用于 arm64，以及未传 `-SkipRuntimeSmoke` 的手动验证；x64 打包只执行第 1 项及可执行文件检查，随后进入 DMG 打包。没有另编译测试应用，也没有通过重新签名规避检查。
 
 1. `codesign --verify --deep --strict` 校验应用及嵌套代码的签名完整性；从 `codesign --display --entitlements :-` 提取最终主程序权限。接受并要求启用 Sandbox、客户端网络和图片目录读写权限（2026-10-25 为原图保存新增 `com.apple.security.assets.pictures.read-write`，见[图片查看器保存与长图](image-viewer-export-long-images.md)）；空 Sharing、其他额外权限、重复／缺失／禁用权限均失败。禁止携带机器专用 `embedded.provisionprofile`。
 2. 运行同一 `Contents/MacOS/BiliSail` 的 `startup` 阶段：从 headless engine 创建明确的主浏览窗，执行正常应用依赖组装与 `BiliApp`，等待首帧 rasterize，继续运行三秒，再实际创建／挂载／激活／回收两轮独立播放窗，验证新增 view 与视口及标题栏返回通道。最后卸载 UI 并关闭应用资源。应用内回退、Flutter／未处理异步错误均使探测失败。窗口初始化原因见[双标签崩溃修复](macos-dual-playback-crash.md)。
 3. 全新进程执行 `write`：直接通过真实默认 `SystemCredentialStore` 写入非敏感合成值，读取核对，再写第二份快照并读取，覆盖双 slot 和 active 切换。凭据阶段只启动同一应用的 headless engine／插件，不创建窗口、不组装首页业务依赖；完整应用及窗口初始化由前一 `startup` 阶段单独验证。
 4. 再启动同一应用执行 `read-delete`：读取上一进程保存的值并核对，删除，仅检查本次探测的 active／a／b 三个 key。
 5. 再次启动执行 `verify-deleted`，核对三个 key 均不存在。启动、写入和读取阶段使用同一 UUID 前缀，避免“重启后重新写值”掩盖持久化失败。
-6. 再次校验 bundle 签名与最终权限，通过后才创建并校验 DMG，最后生成 metadata 和 SHA-256。`macosValidation` 只记录成功状态。
+6. 运行 smoke 后再次校验 bundle 签名与最终权限，通过后才创建并校验 DMG，最后生成 metadata 和 SHA-256。`macosValidation` 记录实际校验状态；x64 的 `startup`／`credentials` 明确为 `skipped`，并记录 `runtimeSmokeSkipReason=disabled-for-build-target`，不表示运行验收通过。
 
-每个子进程分别限制原生启动与 Dart 探测执行：从创建进程到收到第一条 `dart-entry` 最多 180 秒；收到该标记后最多再运行 60 秒，后续重复标记不能重置时限。必须退出码为 0、确认到达 Dart 入口，且返回匹配阶段和 UUID 的完整 stdout 确认行；只看到进程启动、退出码 0 或磁盘文件存在均不算通过。每个凭据步骤另有 10 秒上限，原生调用挂起时退出失败，不重放结果不明的写入。失败时终止本次创建的子进程，并用相同 bundle 的 `cleanup` 阶段删除本次前缀（含 bootstrap／recommendation 辅助前缀）；清理失败仍保持构建失败并明确警告，不自动重试真实账号写操作。进程终止和输出排空各有独立的 5 秒上限，不能在超时后的清理中无限等待。
+每个子进程分别限制原生启动与 Dart 探测执行：从创建进程到收到第一条 `dart-entry` 最多 180 秒；收到该标记后，组合 GUI `startup` 最多再运行 180 秒，`write`／`read-delete`／`verify-deleted`／失败清理仍最多运行 60 秒，后续阶段与重复入口标记不能重置时限。必须退出码为 0、确认到达 Dart 入口，且返回匹配阶段和 UUID 的完整 stdout 确认行；只看到进程启动、退出码 0 或磁盘文件存在均不算通过。每个凭据步骤另有 10 秒上限，原生调用挂起时退出失败，不重放结果不明的写入。失败时终止本次创建的子进程，并用相同 bundle 的 `cleanup` 阶段删除本次前缀（含 bootstrap／recommendation 辅助前缀）；清理失败仍保持构建失败并明确警告，不自动重试真实账号写操作。进程终止和输出排空各有独立的 5 秒上限，不能在超时后的清理中无限等待。
 
-2026-10-31 起，上述阶段在独立 [worker](../../tool/macos-smoke-worker.ps1) 中执行，父进程不读取输出管道，只等待 worker 退出；硬限额为启动预算加执行预算再加 30 秒（默认 270 秒，包含线程采样及终止／排空余量），到期终止本次 worker 及其子进程，终止等待另限 5 秒。签名校验、各阶段确认和失败阻断仍全部保留。Actions 的 macOS 构建／打包步骤另限 30 分钟，整个 macOS job 限 40 分钟；其他目标沿用 90 分钟 job 上限。
+2026-10-31 起，上述阶段在独立 [worker](../../tool/macos-smoke-worker.ps1) 中执行，父进程不读取输出管道，只等待 worker 退出；硬限额为启动预算加执行预算再加 30 秒（当前 GUI 阶段默认 390 秒，凭据阶段 270 秒，包含线程采样及终止／排空余量），到期终止本次 worker 及其子进程，终止等待另限 5 秒。签名校验、各阶段确认和失败阻断仍全部保留。Actions 的 macOS 构建／打包步骤另限 30 分钟，整个 macOS job 限 40 分钟；其他目标沿用 90 分钟 job 上限。
 
 [Dart 探测逻辑](../../lib/app/release_smoke.dart) 只接受显式 `--bilisail-release-smoke <phase> <32位UUID>`，由 [正常入口](../../lib/main.dart) 在 macOS 路由。Flutter macOS 默认将原生进程参数传给 Dart 入口，见 [FlutterDartProject](https://api.flutter.dev/macos-embedder/_flutter_dart_project_8h_source.html)。普通启动不启用探测。`startup` 注入内存 SQLite、独立的空 bootstrap 会话凭据和 recommendation 旧 App 凭据前缀，不恢复真实账号、不修改用户数据库；网络页面仍可请求公开内容，网络成功不是该探测的验收条件。
 
-测试 key 为 `bilisail.release_smoke.v1.<UUID>.active/a/b`，只保存合成字符串；不调用 `deleteAll`，不读取正式登录 key。最终权限和脱敏的阶段／退出码／确认状态按目标保存在 `artifacts/macos-arm64/validation/` 或 `artifacts/macos-x64/validation/`，不保存原生／网络原始输出。2026-10-29 起失败任务只上传脱敏的 `*.result.json`，不上传该目录的其他文件。metadata 仅含通过状态，不含真实凭据、测试值或 Keychain 内容。
+测试 key 为 `bilisail.release_smoke.v1.<UUID>.active/a/b`，只保存合成字符串；不调用 `deleteAll`，不读取正式登录 key。最终权限和脱敏的阶段／退出码／确认状态按目标保存在 `artifacts/macos-arm64/validation/` 或 `artifacts/macos-x64/validation/`，不保存原生／网络原始输出。失败任务仅上传白名单的脱敏 `*.result.json`、`*.crash.json` 和 `*.sample.json`；x64 打包不再生成运行 smoke 结果。metadata 不含真实凭据、测试值或 Keychain 内容。
 
 Intel CI 首次执行启动探测时曾达到原有 60 秒上限。固定 SDK 的普通窗口构造不会激活应用，而原探测在首帧完成后才激活；显式 smoke 现在先激活主窗口再等待首帧，避免后台显示前提造成的等待环。探测监督脚本实时排空两路输出，只导出固定启动阶段、数字焦点状态和脱敏 JSON；不保存原生／网络原始行。普通启动不启用这些探测日志。
 
@@ -120,6 +120,53 @@ Windows x64 / Flutter 3.47.6 的 `tool/check.ps1 -SkipPub` 完整通过格式、
 `foreground-focus`／`foreground-ready` 将激活调用与焦点查询分开记录。Dart 失败仅输出固定类别 `timeout/platform/state/format/framework/asynchronous/other`；worker 在 `errorKind` 保存首个白名单类别，异常消息、平台错误详情、栈和网络原始行仍不落盘。虚拟时间回归覆盖原生回复延迟 16 秒仍能确认焦点、超过 60 秒失败且迟到回复不修改状态、普通查询仍在 2 秒失败；真实子进程回归覆盖失败类别、阶段保留及敏感输出拒绝。
 
 Windows / Flutter 3.47.6 的 `tool/check.ps1 -SkipPub` 完整通过格式、静态分析、打包边界及 4651 项离线测试（根应用 3860、API 536、播放器 105、弹幕 145、封装 5）。13 项符号链接用例因权限跳过，10 项 mux 原生用例因未配置 `BILI_MUX_LIBRARY` 跳过；15 项真实子进程监督回归通过，五份锁文件无改动，本文件 14 条本地链接及 `git diff --check` 通过。日志在 `build/ci-41210169441-fix-check.log`。没有可连接的 DTD／调试应用，未执行热重载；Windows 主机不具备 macOS 原生 GUI 验证能力。修复后的远端构建结果待对应 CI 记录，设备安装、真实账号、音画及性能验收未执行。
+
+## 2026-11-02：Intel 重复应用激活与图形等待
+
+[CI 41323620524 的 Intel job](https://github.com/CKopoer/BiliSail/actions/runs/41323620524/job/124901479137) 对应提交 `5dca04f7d0fcb8360288f2b85cb03f58a9fab601`。Release 编译、架构与签名校验已通过，主窗首帧在进程启动约 3.1 秒完成，两轮播放窗的初始焦点和 Space 检查分别在 6.9 秒、25.3 秒通过。随后 60 秒执行预算耗尽，最后标记为 `BILISAIL_FOCUS_STAGE:passed`；独立 cleanup 成功。其余五个平台构建、离线检查及独立原生 mux 回归均成功。本次失败属于打包前的 GUI 启动验收超时。
+
+本次上传的 `startup.sample.json` 显示，主线程在 `NSApplication _activateUsingEvent → _activateWithInfo → _NXActivateSelf → SLSSetFrontProcessWithInfo → mach_msg2_trap` 等待；另有 `AppleParavirtGPUMetal → MTLIOAccelTexture → IOAccelResourceCreate` 和资源 purgeability 调用等待。采样约 1 秒内这些栈持续存在。这直接定位到 AppKit／WindowServer 与虚拟 GPU 路径，不是 Dart 编译错误或 Keychain 读写失败；单次采样不能证明底层驱动永久死锁。
+
+共享原生 `activate` 处理器此前在应用已经前台、播放窗已经 key 时仍无条件调用 `NSApp.activate(ignoringOtherApps: true)`。每轮 smoke 的 `passed` 后还会调用该处理器。现在只在 `NSApp.isActive == false` 时请求应用激活，仍保留最小化恢复和 `makeKeyAndOrderFront`，用于前台应用内切换窗口。Apple 也说明[窗口成为 key 不要求再次激活应用](https://developer.apple.com/documentation/appkit/nsapplication/activate(ignoringotherapps:))。此改动移除与现场一致的多余激活请求；旧阶段粒度和异步 AppKit 栈不足以证明它是全部虚拟 GPU 等待的唯一来源，修复效果仍需 Intel runner 复验。
+
+启动 smoke 继续执行两轮窗口测试，并增加 `bind/reactivate/reactivated/unbind/geometry/detach/retire/retired` 固定标记，分别定位返回按钮绑定、再激活、返回按钮解除、几何采集、Flutter view 卸载和原生 view 回收。监督器只接受完整白名单行；额外文本、URL 或异常详情仍被丢弃。单轮测试、总执行预算、外层监督、签名、首帧及跨进程凭据门槛保持原值，没有自动重试。
+
+Intel 虚拟 runner 的 GUI 往返会消耗同一执行预算，例如本次第二轮呈现到焦点检查约耗时 16 秒。应区分编译／打包失败与运行验收失败；当前打包仍以完整 smoke 为门槛，不能将因环境敏感而失败的 smoke 记为应用已通过设备验收。本机 Windows 可运行离线回归，但不能验证 AppKit、实际 x64 Release 启动或 DMG；新提交的 macOS 构建、设备安装、真实账号和音画验收另行记录。
+
+本轮 Windows / Flutter 3.47.6 的 `tool/check.ps1 -EnforceLockfile` 完整通过：五份锁文件严格解析、格式、统一静态分析、打包边界和 4839 项 Dart／Flutter 测试（根应用 4006、API 544、播放器 131、弹幕 153、封装 5）。13 项 Windows 符号链接用例因权限不足跳过，10 项 mux 原生用例因未设置 `BILI_MUX_LIBRARY` 跳过；这些跳过不计为原生验证通过。监督脚本 15 个真实子进程场景通过，新增八个阶段的白名单／敏感后缀拒绝检查通过；两份修改的 PowerShell 脚本语法、58 条文档本地路径及 `git diff --check` 通过，五份锁文件无差异。日志保存在 `build/ci-41323620524-fix-check.log` 和 `build/ci-41323620524-smoke-check.log`。没有可连接的 DTD／调试应用，未完成热重载；修复后的远端 macOS 构建和 GUI 验收以对应提交的 CI 结果为准，不将离线检查视作 Intel GUI 等待已经消失的证据。
+
+## 2026-11-02：组合 GUI 检查的执行预算
+
+[CI 41436650047 的 Intel job](https://github.com/CKopoer/BiliSail/actions/runs/41436650047/job/125252164120) 对应提交 `2053716ff3845cdd31454e65606a8e9bb520f43d`，已包含上一节的激活修复。完整日志和本次上传的 `startup.result.json` 确认：Release 编译、架构、签名、主窗首帧、两轮播放窗初始焦点及 Space 检查均已完成，最后在第二轮 `retire` 耗尽 60 秒 Dart 执行预算。独立 cleanup 成功，其余五个平台及离线检查通过。`exitCode=137` 出现在监督器超时采样并终止进程之后，不能当作应用自行崩溃。
+
+本次进程内单调时间如下；执行截止点为首次 `dart-entry` 后 60 秒，即进程启动后约 65.924 秒：
+
+| 操作 | 起止时间 | 耗时 |
+| --- | --- | --- |
+| 到达 Dart／主窗首帧 | 5.924／7.617 秒 | 首帧已完成 |
+| 两轮 Space 检查通过 | 11.423／28.194 秒 | 两次输入断言已通过 |
+| 第一轮窗口回收 | 12.192 → 27.908 秒 | 15.716 秒 |
+| 第二轮再激活 | 28.199 → 45.707 秒 | 17.508 秒 |
+| 第二轮几何读取至卸载 | 45.709 → 53.453 秒 | 7.744 秒 |
+| 第二轮窗口回收 | 53.456 秒开始 | 截止前仅余约 12.5 秒 |
+
+对照上一次 [Intel 成功 job](https://github.com/CKopoer/BiliSail/actions/runs/41326732189/job/124910573646)，相同激活代码的第二轮回收从 11.279 秒持续到 42.075 秒，单次耗时 **30.796 秒**，随后完整 smoke 和 DMG 打包通过。已成功的回收操作也可能超过本次剩余时间，说明组合 GUI 操作沿用凭据探测的 60 秒总预算缺少余量。不能据此证明本次只需多等几秒就一定成功；本次 `startup.sample.json` 的采样状态是 `timed_out`，没有取得线程栈，历史图形等待现场不能冒充本次采样证据。重跑可能成功，但不会消除该预算配置缺口，也不能把历史 SIGSEGV、焦点断言失败和执行超时统一归为同一个问题。
+
+本轮在共享发布校验脚本中按阶段选择固定预算：`startup` 从首次 Dart 入口起 **180 秒**，为首帧／观察、两轮窗口交互与回收的组合检查留出余量；四个凭据／清理阶段仍为 **60 秒**，原生启动仍为 **180 秒**。父进程把预算显式传给独立 worker，worker 不另设默认值；外层硬限额随实际预算计算。日志及运行中的脱敏 JSON 均记录所选预算。Dart 的单次焦点查询仍限 60 秒，凭据单步仍限 10 秒。所有成功断言、退出码、确认行、签名与权限校验继续生效，进度不能续期，不自动重试。CI 与 Release 复用同一校验入口，因此无需修改两份工作流的 30／40 分钟上限。
+
+新增真实子进程回归覆盖五种阶段默认值跨父进程／worker 传递、组合 GUI 流程在所选预算内完成，以及仍持续产生合法进度时总超时照常失败。本机 Windows 的定向监督回归共 22 项通过；实际 Intel GUI 在新预算下的成功率仍需修复后的 macOS CI 复验。该修复调整 CI 容忍的执行时间，不宣称修复了底层 WindowServer／虚拟 GPU 延迟，也不代表设备安装、真实账号、音画或性能验收。
+
+本轮 Windows / Flutter 3.47.6 的 `tool/check.ps1 -SkipPub` 完整通过：格式、静态分析、打包边界和 4843 项 Dart／Flutter 离线测试（根应用 4010、API 544、播放器 131、弹幕 153、封装 5），另有 15 项 Python 采集器测试、22 项真实子进程监督回归通过。13 项 Windows 符号链接用例因权限跳过，10 项 mux 原生用例因未配置 `BILI_MUX_LIBRARY` 跳过，不计作原生通过。四份 PowerShell 脚本语法、两份文档共 59 条本地链接及 `git diff --check` 通过，五份锁文件未变化。完整日志为 `build/ci-41436650047-fix-check.log`，定向日志为 `build/ci-41436650047-smoke-check.log`。Dart 文件只同步计时说明注释；没有运行中的 DTD／调试应用可热重载，未执行新安装包构建、macOS GUI、设备或性能验证。
+
+## 2026-11-02：x64 打包移除运行 smoke
+
+[CI 41468230710 的 Intel job](https://github.com/CKopoer/BiliSail/actions/runs/41468230710/job/125360623705) 已完成 Release 编译、四份二进制架构、版本和签名校验。`startup.result.json` 显示首次 Dart 入口在进程启动后 3.780 秒，首帧在 4.878 秒完成；进程约 7.066 秒以 `exitCode=139`（SIGSEGV）退出，`timedOut=false`、`supervisorTimedOut=false`，没有成功确认行，最后阶段为 `first-frame`。这次不是 180 秒预算不足；`startup.crash.json` 为 `not_found`，不足以确定原生崩溃模块，也不能直接归因于历史 WindowServer／虚拟 GPU 等待。失败后的独立 `cleanup` 成功，其余五个平台构建、离线检查及原生 mux 任务通过。
+
+按用户要求，[共用打包脚本](../../tool/build-release.ps1) 仅对 `macos-x64` 传入 `-SkipRuntimeSmoke`：不启动 GUI、不执行两轮播放窗／焦点测试，也不执行合成 Keychain 读写、重启和 cleanup。验证辅助脚本在跳过分支之前仍校验签名、最终权限和可执行文件；架构、版本、DMG 创建／校验、源码归档和 SHA-256 流程继续执行。该选择同时作用于 CI、Release 新建构建和本地共用入口，arm64 继续完整 smoke，辅助脚本默认也继续完整验证。源码中的 smoke 逻辑及离线行为回归保留。
+
+x64 metadata 将 `startup` 和 `credentials` 标为 `skipped`，附带固定跳过原因；不将未运行的检查写成通过。这项调整解除运行验证对 x64 出包的阻断，没有修复或确认消除本次原生崩溃。实际 Intel Mac 启动、安装升级、Keychain 登录持久化和播放仍须另行验收。
+
+本轮 Windows / Flutter 3.47.6 的 `tool/check.ps1 -SkipPub` 完整通过：格式、静态分析、打包边界和 4888 项 Dart／Flutter 离线测试（根应用 4048、API 544、播放器 138、弹幕 153、封装 5）。13 项 Windows 符号链接用例因权限跳过，10 项 mux 原生用例因未配置 `BILI_MUX_LIBRARY` 跳过，不计作原生通过。新增 7 项打包边界回归直接执行生产调用，覆盖 x64 跳过及 metadata、arm64 完整阶段与失败清理、两种模式的签名／可执行文件失败；原有 22 项真实子进程监督回归及 15 项 Python 采集器测试通过。三份 PowerShell 脚本语法、CI／Release 工作流 actionlint 1.7.12、两份文档的 60 条本地链接和 `git diff --check` 通过，五份锁文件无改动。完整日志为 `build/ci-41468230710-check.log`，定向日志为 `build/ci-41468230710-smoke-check.log`。本轮未执行新 macOS 构建、GUI 或设备验证，远端出包结果待修改推送后的新 CI 确认。
 
 ## 旧数据与升级单独验收
 

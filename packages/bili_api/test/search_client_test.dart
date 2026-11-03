@@ -106,6 +106,107 @@ const _article = {
 
 void main() {
   test(
+    'suggestions sign and encode the term once, use plain terms and bound results',
+    () async {
+      final transport = _Transport((uri) {
+        expect(uri.path, '/x/web-interface/suggest');
+        expect(uri.queryParameters['term'], '中文 & + %');
+        expect(uri.queryParameters['highlight'], '0');
+        expect(uri.queryParameters['spmid'], '333.1365');
+        expect(uri.queryParameters['web_location'], '333.1365');
+        expect(uri.queryParameters['w_rid'], isNotEmpty);
+        return {
+          'result': {
+            'tag': [
+              {'term': ' 真实词 ', 'name': '<em>展示词</em>'},
+              {'term': '真实词'},
+              {'term': ''},
+              {'name': '缺失关键词'},
+              {'term': 42},
+              {'term': 'x' * 201},
+              ...List.generate(30, (i) => {'term': '候选$i'}),
+            ],
+          },
+        };
+      });
+      final result = await SearchClient(
+        BiliApiClient(transport: transport),
+      ).suggestions(' 中文 & + % ');
+      expect(result.length, 10);
+      expect(result.first, '真实词');
+      expect(result.last, '候选8');
+      expect(
+        transport.calls.where((uri) => !uri.path.endsWith('/nav')).length,
+        1,
+      );
+    },
+  );
+
+  test('empty and oversized suggestions never send a request', () async {
+    final transport = _Transport((_) => throw StateError('Unexpected request'));
+    final client = SearchClient(BiliApiClient(transport: transport));
+    expect(await client.suggestions('  '), isEmpty);
+    expect(await client.suggestions('x' * 201), isEmpty);
+    expect(transport.calls, isEmpty);
+  });
+
+  test('empty suggestion result is valid; malformed containers fail', () async {
+    expect(
+      await _client((_) => {'result': <String, Object?>{}}).suggestions('词'),
+      isEmpty,
+    );
+    for (final result in <Object?>[
+      null,
+      [],
+      {'tag': 'invalid'},
+    ]) {
+      await expectLater(
+        _client((_) => {'result': result}).suggestions('词'),
+        throwsA(
+          isA<ApiFailure>().having(
+            (error) => error.category,
+            'category',
+            ApiFailureCategory.protocol,
+          ),
+        ),
+      );
+    }
+  });
+
+  test(
+    'trending uses bounded public ranking and separates label from query',
+    () async {
+      final transport = _Transport((uri) {
+        expect(uri.path, '/x/v2/search/trending/ranking');
+        expect(uri.queryParameters, {'limit': '10'});
+        return {
+          'list': [
+            {'keyword': '真实词', 'show_name': '展示词'},
+            {'keyword': '真实词'},
+            {'keyword': ''},
+            {'keyword': '后备'},
+            ...List.generate(30, (i) => {'keyword': '词$i'}),
+          ],
+        };
+      });
+      final result = await SearchClient(
+        BiliApiClient(transport: transport),
+      ).trending();
+      expect(result.length, 10);
+      expect(result.first.keyword, '真实词');
+      expect(result.first.label, '展示词');
+      expect(result[1].label, '后备');
+      expect(transport.calls.length, 1);
+    },
+  );
+
+  test('malformed trending is a protocol failure', () async {
+    await expectLater(
+      _client((_) => {'list': 'bad'}).trending(),
+      throwsA(isA<ApiFailure>()),
+    );
+  });
+  test(
     'all search decodes six content types, previews and server counts',
     () async {
       final result = await _client((uri) {

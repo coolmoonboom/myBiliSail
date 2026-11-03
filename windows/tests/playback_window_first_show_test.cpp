@@ -57,6 +57,69 @@ class TestWindow {
   HWND window_;
 };
 
+// Model the SDK host forwarding frame messages to a shared plugin delegate.
+// window_manager 0.5.2 uses the main window's zoom state in WM_NCCALCSIZE,
+// even when this message belongs to a different, ordinary playback window.
+class SdkWindowHost {
+ public:
+  SdkWindowHost(HWND window, bool main_maximized)
+      : window_(window), main_maximized_(main_maximized) {
+    child_ = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
+                             0, 0, 1, 1, window_, nullptr,
+                             GetModuleHandle(nullptr), nullptr);
+    Require(child_ != nullptr, "Cannot create SDK view child.");
+    Require(SetWindowSubclass(window_, WindowProc, SubclassId(),
+                               reinterpret_cast<DWORD_PTR>(this)) != FALSE,
+            "Cannot install SDK host fixture.");
+  }
+  ~SdkWindowHost() {
+    RemoveWindowSubclass(window_, WindowProc, SubclassId());
+    DestroyWindow(child_);
+  }
+  SdkWindowHost(const SdkWindowHost&) = delete;
+  SdkWindowHost& operator=(const SdkWindowHost&) = delete;
+
+  HWND child() const { return child_; }
+  int frame_delegate_calls() const { return frame_delegate_calls_; }
+
+ private:
+  static UINT_PTR SubclassId() {
+    return reinterpret_cast<UINT_PTR>(&WindowProc);
+  }
+  static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam,
+                                     LPARAM lparam, UINT_PTR, DWORD_PTR data) {
+    auto& host = *reinterpret_cast<SdkWindowHost*>(data);
+    if (message == WM_NCCALCSIZE && wparam) {
+      ++host.frame_delegate_calls_;
+      if (host.main_maximized_) {
+        auto& client = reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam)->rgrc[0];
+        MONITORINFO monitor{};
+        monitor.cbSize = sizeof(monitor);
+        if (!GetMonitorInfo(MonitorFromRect(&client, MONITOR_DEFAULTTONEAREST),
+                             &monitor)) {
+          return DefSubclassProc(window, message, wparam, lparam);
+        }
+        const LONG offset = client.left - monitor.rcWork.left;
+        client.left -= offset;
+        client.right += offset;
+        return 0;
+      }
+    } else if (message == WM_SIZE) {
+      RECT client{};
+      GetClientRect(window, &client);
+      MoveWindow(host.child_, client.left, client.top,
+                  client.right - client.left, client.bottom - client.top, TRUE);
+      return 0;
+    }
+    return DefSubclassProc(window, message, wparam, lparam);
+  }
+
+  HWND window_;
+  HWND child_ = nullptr;
+  const bool main_maximized_;
+  int frame_delegate_calls_ = 0;
+};
+
 class FirstVisiblePresentation {
  public:
   explicit FirstVisiblePresentation(HWND window) : window_(window) {
@@ -298,6 +361,126 @@ void RunInitialSizeTests() {
           "Retired owner retained its initial size constraint.");
 }
 
+void RunRestoredNormalSizeTests() {
+  for (const int width : {460, 1100}) {
+    playback_window::WindowGeometrySession session;
+    playback_window::Bounds saved{};
+    {
+      const TestWindow original;
+      const playback_window::PlaybackWindowFrame caption(original.get());
+      Require(session.Restore(original.get(), 100, 100),
+              "Cannot prepare original normal window.");
+      ShowWindow(original.get(), SW_SHOWNORMAL);
+      Require(SetWindowPos(original.get(), nullptr, 120, 140, width, 740,
+                           SWP_NOZORDER | SWP_NOACTIVATE) != FALSE,
+              "Cannot resize original normal window.");
+      Require(session.SaveAndHide(original.get(), 100, 100),
+              "Cannot save original normal window.");
+      saved = *session.saved().normal();
+    }
+    for (int64_t owner = 101; owner <= 102; ++owner) {
+      const TestWindow reopened;
+      const HWND window = reopened.get();
+      const playback_window::PlaybackWindowFrame caption(window);
+      RECT default_client{};
+      Require(GetClientRect(window, &default_client) != FALSE,
+              "Cannot read default client size.");
+      Require(session.Restore(window, owner, owner),
+              "Cannot restore normal window.");
+      RequireBounds(window, saved);
+      Require(!IsWindowVisible(window), "Normal preparation showed the window.");
+      RECT restored_client{};
+      Require(GetClientRect(window, &restored_client) != FALSE,
+              "Cannot read restored client size.");
+      Require(restored_client.right != default_client.right,
+              "Test did not change the default client width.");
+      const auto initial_content = session.InitialContentSize(window);
+      Require(initial_content.has_value(),
+              "Restored normal window has no initial client size.");
+      Require(initial_content->cx == restored_client.right &&
+                  initial_content->cy == restored_client.bottom,
+              "Normal first scene uses stale metrics or outer bounds.");
+      // The SDK sizes to the first Flutter scene before showing the window.
+      // Its standard caption insets must not change our saved outer bounds.
+      SetWindowPos(window, nullptr, 0, 0,
+                   static_cast<int>(saved.width),
+                   static_cast<int>(saved.height) + 31,
+                   SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER);
+      ShowWindow(window, SW_SHOWNORMAL);
+      RequireBounds(window, saved);
+      Require(!IsZoomed(window), "Normal reopen became maximized.");
+      Require(!session.InitialContentSize(window),
+              "Normal first-scene size survived first show.");
+      Require(session.SaveAndHide(window, owner, owner),
+              "Cannot save reopened normal window.");
+      Require(!session.InitialContentSize(window),
+              "Retired normal window retained its first-scene size.");
+    }
+  }
+}
+
+void RunSharedFrameDelegateTests() {
+  for (const bool main_maximized : {true, false}) {
+    playback_window::WindowGeometrySession session;
+    playback_window::Bounds saved{};
+    {
+      const TestWindow original;
+      const playback_window::PlaybackWindowFrame caption(original.get());
+      Require(session.Restore(original.get(), 201, 201), "Cannot prepare seed window.");
+      ShowWindow(original.get(), SW_SHOWNORMAL);
+      SetWindowPos(original.get(), nullptr, 240, 140, 460, 740,
+                   SWP_NOZORDER | SWP_NOACTIVATE);
+      Require(session.SaveAndHide(original.get(), 201, 201), "Cannot save seed window.");
+      saved = *session.saved().normal();
+    }
+    for (int64_t owner = 202; owner <= 203; ++owner) {
+      const TestWindow reopened;
+      const HWND window = reopened.get();
+      RECT default_frame{}, default_client{};
+      GetWindowRect(window, &default_frame);
+      GetClientRect(window, &default_client);
+      const LONG side_insets = default_frame.right - default_frame.left -
+                              default_client.right;
+      const SdkWindowHost host(window, main_maximized);
+      const playback_window::PlaybackWindowFrame caption(window);
+      Require(session.Restore(window, owner, owner), "Cannot restore hosted window.");
+      for (const bool show : {false, true}) {
+        if (show) ShowWindow(window, SW_SHOWNORMAL);
+        RequireBounds(window, saved);
+        RECT client{}, child{};
+        GetClientRect(window, &client);
+        GetClientRect(host.child(), &child);
+        Require(client.right == static_cast<LONG>(saved.width) - side_insets,
+                "Main-window delegate corrupted the playback client width.");
+        Require(child.right == client.right && child.bottom == client.bottom,
+                "SDK child does not fill the playback client area.");
+        POINT origin{};
+        MapWindowPoints(host.child(), window, &origin, 1);
+        Require(origin.x == 0 && origin.y == 0,
+                "SDK child is displaced outside the playback window.");
+      }
+      const LONG_PTR style = GetWindowLongPtr(window, GWL_STYLE);
+      SetWindowLongPtr(window, GWL_STYLE, style & ~WS_OVERLAPPEDWINDOW);
+      SetWindowPos(window, nullptr, 0, 0, 900, 700,
+                   SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+      RECT fullscreen{}, fullscreen_child{};
+      GetClientRect(window, &fullscreen);
+      GetClientRect(host.child(), &fullscreen_child);
+      Require(fullscreen.right == 900 && fullscreen.bottom == 700 &&
+                  fullscreen_child.right == 900 && fullscreen_child.bottom == 700,
+              "Main-window delegate corrupted fullscreen playback bounds.");
+      SetWindowLongPtr(window, GWL_STYLE, style);
+      SetWindowPos(window, nullptr, static_cast<int>(saved.left),
+                   static_cast<int>(saved.top), static_cast<int>(saved.width),
+                   static_cast<int>(saved.height),
+                   SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+      Require(host.frame_delegate_calls() == 0,
+              "Playback frame reached the main-window plugin delegate.");
+      Require(session.SaveAndHide(window, owner, owner), "Cannot close hosted window.");
+    }
+  }
+}
+
 void RunTests() {
   {
     playback_window::WindowGeometrySession closing;
@@ -387,8 +570,12 @@ void RunTests() {
   {
     const TestWindow ordinary;
     Require(session.Restore(ordinary.get(), 3, 3), "Normal reopen failed.");
-    Require(!session.InitialContentSize(ordinary.get()),
-            "Normal reopen requested a maximized first scene.");
+    const auto initial_content = session.InitialContentSize(ordinary.get());
+    RECT client{};
+    Require(initial_content && GetClientRect(ordinary.get(), &client) &&
+                initial_content->cx == client.right &&
+                initial_content->cy == client.bottom,
+            "Normal reopen did not request its actual client size.");
     ShowWindow(ordinary.get(), SW_SHOWNORMAL);
     Require(!IsZoomed(ordinary.get()), "Normal reopen ignored user's Restore.");
     RequireBounds(ordinary.get(), normal);
@@ -588,10 +775,12 @@ int wmain(int argc, wchar_t* argv[]) {
     RunTests();
     RunTransitionTests();
     RunFrameTests();
+    RunSharedFrameDelegateTests();
+    RunRestoredNormalSizeTests();
     RunInitialSizeTests();
     RunPersistenceTests();
     UnregisterClassW(window_class.lpszClassName, window_class.hInstance);
-    std::cout << "PASS native first show, caption and persistence: SDK restore reproduction, directly visible maximized reopen, user Restore, normal bounds, minimize, pending close, reentrant cancellation, stale owner, fullscreen, custom client frame, app brightness, detach, independent roles, cross-process restore and corrupt records\n";
+    std::cout << "PASS native first show, caption and persistence: SDK restore reproduction, directly visible maximized reopen, user Restore, normal bounds, narrow/wide first scene on repeated reopen, main-window delegate isolation and SDK child bounds, minimize, pending close, reentrant cancellation, stale owner, fullscreen, custom client frame, app brightness, detach, independent roles, cross-process restore and corrupt records\n";
     return 0;
   } catch (const std::exception& error) {
     std::cerr << "FAIL native first show: " << error.what() << '\n';

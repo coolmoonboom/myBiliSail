@@ -8,6 +8,71 @@ final class SearchClient {
   const SearchClient(this.api);
   final BiliApiClient api;
   static const _endpoint = 'search';
+
+  Future<List<String>> suggestions(
+    String query, {
+    ApiRequestContext? context,
+  }) async {
+    final term = query.trim();
+    if (term.isEmpty || term.length > 200) return const [];
+    final data = await api.requestWbiJson(
+      '/x/web-interface/suggest',
+      {
+        'term': term,
+        'highlight': '0',
+        'spmid': '333.1365',
+        'web_location': '333.1365',
+      },
+      'search_suggestions',
+      context: context,
+    );
+    final result = data['result'];
+    if (result is! Map<String, Object?>) return _fail();
+    final tags = result['tag'];
+    if (tags == null) return const [];
+    if (tags is! List<Object?>) return _fail();
+    final terms = <String>{};
+    for (final tag in tags.take(30)) {
+      if (tag is! Map<String, Object?>) continue;
+      final value = tag['term'];
+      if (value is! String) continue;
+      final text = value.trim();
+      if (text.isNotEmpty && text.length <= 200) terms.add(text);
+      if (terms.length == 10) break;
+    }
+    return List.unmodifiable(terms);
+  }
+
+  Future<List<ApiSearchTrend>> trending({ApiRequestContext? context}) async {
+    final data = await api.requestJson(
+      Uri.https('api.bilibili.com', '/x/v2/search/trending/ranking', {
+        'limit': '10',
+      }),
+      'search_trending',
+      context: context,
+    );
+    final list = data['list'];
+    if (list is! List<Object?>) return _fail();
+    final keywords = <String>{};
+    final result = <ApiSearchTrend>[];
+    for (final item in list.take(30)) {
+      if (item is! Map<String, Object?>) continue;
+      final keyword = _clean(item['keyword']);
+      if (keyword.isEmpty || keyword.length > 200 || !keywords.add(keyword)) {
+        continue;
+      }
+      final label = _clean(item['show_name']);
+      result.add(
+        ApiSearchTrend(
+          keyword: keyword,
+          label: label.isEmpty ? keyword : label,
+        ),
+      );
+      if (result.length == 10) break;
+    }
+    return List.unmodifiable(result);
+  }
+
   static const _types = {
     ApiSearchType.video: 'video',
     ApiSearchType.bangumi: 'media_bangumi',

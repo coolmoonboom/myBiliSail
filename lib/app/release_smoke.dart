@@ -13,10 +13,10 @@ import '../core/presentation/app_input_host.dart';
 import '../core/presentation/window_input_focus.dart';
 import '../core/storage/credential_store.dart';
 
-// Match the existing outer probe budget. A virtual Mac's platform queue can
+// Bound each focus query. A virtual Mac's platform queue can
 // take longer than the interactive two-second focus RPC limit even when its
-// eventual key-window snapshot is correct. The supervisor still kills the
-// entire probe after 60 seconds; this does not give each step a new budget.
+// eventual key-window snapshot is correct. The supervisor separately caps the
+// complete GUI probe at 180 seconds; queries cannot renew that total budget.
 const releaseSmokeFocusTimeout = Duration(seconds: 60);
 
 String releaseSmokeErrorMarker(Object error) {
@@ -161,24 +161,32 @@ Future<void> verifyMacOSPlaybackWindows(
         throw StateError('Playback Space sequence was not handled');
       }
       stderr.writeln('BILISAIL_FOCUS_STAGE:passed');
+      stderr.writeln('BILISAIL_FOCUS_STAGE:bind');
       await playback.windowService.bindTitleBarBack(
         owner: owner,
         onBack: () {},
       );
+      stderr.writeln('BILISAIL_FOCUS_STAGE:reactivate');
       await playback.windowService.activate();
+      stderr.writeln('BILISAIL_FOCUS_STAGE:reactivated');
     } finally {
       try {
+        stderr.writeln('BILISAIL_FOCUS_STAGE:unbind');
         await playback.windowService.unbindTitleBarBack(owner);
+        stderr.writeln('BILISAIL_FOCUS_STAGE:geometry');
         await playback.saveGeometry();
       } finally {
+        stderr.writeln('BILISAIL_FOCUS_STAGE:detach');
         mainWindow.present(app);
         try {
           await binding.endOfFrame.timeout(const Duration(seconds: 5));
         } finally {
           // Native removal can pump frames. Leave the frame stack first.
           await Future<void>.delayed(Duration.zero);
+          stderr.writeln('BILISAIL_FOCUS_STAGE:retire');
           playback.dispose();
           input.dispose();
+          stderr.writeln('BILISAIL_FOCUS_STAGE:retired');
         }
       }
     }

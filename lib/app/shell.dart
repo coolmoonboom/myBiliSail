@@ -8,6 +8,7 @@ import '../core/platform/window_caption.dart';
 import '../core/platform/window_size_policy.dart';
 import '../features/feed/domain/home_channel.dart';
 import '../features/search/presentation/search_category_bar.dart';
+import '../features/search/presentation/search_entry_header.dart';
 import '../core/presentation/workspace_activity.dart';
 import '../core/presentation/page_back_scope.dart';
 import '../core/presentation/predictive_back_region.dart';
@@ -389,17 +390,13 @@ final class _BiliAppShellState extends State<BiliAppShell>
   TextEditingController _searchFor(WorkspaceTab tab) =>
       _searchControllers.putIfAbsent(tab.id, () {
         final controller = TextEditingController(
-          text:
-              _searchDrafts[tab.id] ?? tab.location.queryParameters['q'] ?? '',
+          text: _searchDrafts[tab.id] ?? '',
         );
         controller.addListener(() => _searchDrafts[tab.id] = controller.text);
         return controller;
       });
   void _restoreSearch() {
-    _searchFor(_displayTab).text =
-        _searchDrafts[_displayTab.id] ??
-        _displayTab.location.queryParameters['q'] ??
-        '';
+    _searchFor(_displayTab).text = _searchDrafts[_displayTab.id] ?? '';
   }
 
   @override
@@ -1654,13 +1651,21 @@ final class _BiliAppShellState extends State<BiliAppShell>
       WorkspaceSection.mine,
       WorkspaceSection.settings,
     ];
+    final tab = _frameTab(context);
     final selected = sectionForLocation(
-      _frameTab(context).location,
+      tab.location,
       compact: _compactChannels,
     );
     if (!sections.contains(selected)) {
       return _unselectedBottomNavigation(context, sections);
     }
+    // A highlighted group can include other pages, such as history under
+    // Mine. Suppress re-selection only on the destination's own page.
+    final atSelectedDestination = switch (selected) {
+      WorkspaceSection.mine => tab.isAccount,
+      WorkspaceSection.settings => tab.isSettings,
+      _ => tab.isBrowse,
+    };
     return NavigationBar(
       key: const ValueKey('workspace-bottom-navigation'),
       animationDuration: MediaQuery.disableAnimationsOf(context)
@@ -1678,7 +1683,7 @@ final class _BiliAppShellState extends State<BiliAppShell>
       }),
       selectedIndex: sections.indexOf(selected),
       onDestinationSelected: (index) {
-        if (sections[index] != selected) {
+        if (sections[index] != selected || !atSelectedDestination) {
           _selectSection(sections[index], compact: true);
         }
       },
@@ -2089,21 +2094,12 @@ final class _BiliAppShellState extends State<BiliAppShell>
       }
       return navigation ?? const SizedBox.shrink();
     }
-    final tools = _tools(context);
     return compact || constraints.maxWidth < 760
-        ? Column(mainAxisSize: MainAxisSize.min, children: [tools, ?navigation])
-        : SizedBox(
-            height: PageTabStyle.barHeight,
-            child: Row(
-              children: [
-                SizedBox(
-                  width: constraints.maxWidth >= 1300 ? 470 : 380,
-                  child: tools,
-                ),
-                if (navigation != null) Expanded(child: navigation),
-              ],
-            ),
-          );
+        ? Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [_tools(context), ?navigation],
+          )
+        : _tools(context, navigation: navigation, inlineNavigation: true);
   }
 
   IconData _channelIcon(HomeChannel channel) => switch (channel) {
@@ -2121,12 +2117,20 @@ final class _BiliAppShellState extends State<BiliAppShell>
     HomeChannel.favorites => BiliIcons.favorite,
   };
 
-  Widget _tools(BuildContext context) => SizedBox(
+  Widget _tools(
+    BuildContext context, {
+    Widget? navigation,
+    bool inlineNavigation = false,
+  }) => SizedBox(
     key: const ValueKey('workspace-common-tools'),
-    height: 52,
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 10),
-      child: Row(
+    child: SearchEntryHeader(
+      key: ValueKey(('search-entry', _frameTab(context).id)),
+      controller: _searchFor(_frameTab(context)),
+      onSearch: _search,
+      navigation: navigation,
+      inlineNavigation: inlineNavigation,
+      leading: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
           if (_frameShowsBack(context) && widget.windowControlsBuilder == null)
             _backButton(),
@@ -2134,29 +2138,11 @@ final class _BiliAppShellState extends State<BiliAppShell>
             builder(context),
             const SizedBox(width: 5),
           ],
-          Expanded(
-            child: SizedBox(
-              height: 34,
-              child: TextField(
-                key: const ValueKey('workspace-search'),
-                controller: _searchFor(_frameTab(context)),
-                textInputAction: TextInputAction.search,
-                style: const TextStyle(fontSize: 12),
-                onSubmitted: _search,
-                decoration: InputDecoration(
-                  hintText: '搜索视频、UP 主、番剧',
-                  isDense: true,
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 10),
-                  suffixIcon: IconButton(
-                    tooltip: '搜索',
-                    onPressed: () =>
-                        _search(_searchFor(_frameTab(context)).text),
-                    icon: const Icon(BiliIcons.search, size: 17),
-                  ),
-                ),
-              ),
-            ),
-          ),
+        ],
+      ),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
           const SizedBox(width: 5),
           if (_frameTab(context).location.path != '/' &&
               _frameTab(context).location.path != '/search' &&

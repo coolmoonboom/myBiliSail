@@ -1,4 +1,5 @@
 import 'package:bili_player/src/media_kit_video_output.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:media_kit/media_kit.dart' as mk;
@@ -7,28 +8,29 @@ import 'package:media_kit_video/media_kit_video.dart' as mkv;
 final class _Player extends mk.PlatformPlayer {
   _Player() : super(configuration: const mk.PlayerConfiguration());
 
-  bool get hasWidthListener => widthController.hasListener;
-  bool get hasHeightListener => heightController.hasListener;
+  bool get hasWidthListener => sizeController.hasListener;
+  bool get hasHeightListener => sizeController.hasListener;
   int pauses = 0, plays = 0;
 
   @override
   Future<void> pause() async {
     pauses++;
-    state = state.copyWith(playing: false);
+    state.playing = false;
     playingController.add(false);
   }
 
   @override
   Future<void> play() async {
     plays++;
-    state = state.copyWith(playing: true);
+    state.playing = true;
     playingController.add(true);
   }
 
   void publishDimensions(int width, int height) {
-    state = state.copyWith(width: width, height: height);
-    widthController.add(width);
-    heightController.add(height);
+    state
+      ..width = width
+      ..height = height;
+    sizeController.add((width, height));
   }
 }
 
@@ -48,7 +50,6 @@ final class _PlatformOutput extends mkv.PlatformVideoController {
 final class _PlayerFacade extends Fake implements mk.Player {
   _PlayerFacade(this.platform);
 
-  @override
   final mk.PlatformPlayer platform;
 
   @override
@@ -58,39 +59,21 @@ final class _PlayerFacade extends Fake implements mk.Player {
   mk.PlayerStream get stream => platform.stream;
 
   @override
-  Future<void> pause() => platform.pause();
+  Future<void> pause({bool synchronized = true}) => platform.pause();
 
   @override
-  Future<void> play() => platform.play();
+  Future<void> play({bool synchronized = true}) => platform.play();
 }
 
-final class _Controller extends Fake implements mkv.VideoController {
+final class _Controller extends _PlatformOutput {
   _Controller(_Player backend, int textureId, {bool rendered = true})
-    : player = _PlayerFacade(backend) {
-    output = _PlatformOutput(player, textureId);
-    notifier = ValueNotifier(output);
-    if (rendered) output.renderFrame();
+    : super(_PlayerFacade(backend), textureId) {
+    if (rendered) renderFrame();
   }
-
-  @override
-  final mk.Player player;
-  late final _PlatformOutput output;
-  @override
-  late final ValueNotifier<mkv.PlatformVideoController?> notifier;
-
-  @override
-  ValueNotifier<int?> get id => output.id;
-
-  @override
-  ValueNotifier<Rect?> get rect => output.rect;
-
-  @override
-  Future<void> get waitUntilFirstFrameRendered =>
-      output.waitUntilFirstFrameRendered;
-
+  _PlatformOutput get output => this;
   void dispose() {
-    notifier.dispose();
-    output.dispose();
+    id.dispose();
+    rect.dispose();
   }
 }
 
@@ -108,6 +91,59 @@ final class _Harness {
 }
 
 void main() {
+  testWidgets('video output leaves wheel input and scaling to its host', (
+    tester,
+  ) async {
+    final player = _Player()..publishDimensions(1920, 1080);
+    final controller = _Controller(player, 44);
+    final harness = _Harness();
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox());
+      harness.output.dispose();
+      controller.dispose();
+      await player.dispose();
+    });
+    harness.controllers.value = controller;
+    var scrolls = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Listener(
+          behavior: HitTestBehavior.opaque,
+          onPointerSignal: (event) {
+            if (event is PointerScrollEvent) {
+              GestureBinding.instance.pointerSignalResolver.register(
+                event,
+                (_) => scrolls++,
+              );
+            }
+          },
+          child: harness.output.buildVideoSurface(),
+        ),
+      ),
+    );
+    await tester.pump();
+    final texture = find.byType(Texture);
+    expect(texture, findsOneWidget);
+    final rect = tester.getRect(texture);
+    for (final delta in [
+      const Offset(0, -120),
+      const Offset(0, 120),
+      const Offset(120, 0),
+    ]) {
+      tester.binding.handlePointerEvent(
+        PointerScrollEvent(
+          position: tester.getCenter(find.byType(mkv.Video)),
+          scrollDelta: delta,
+        ),
+      );
+      await tester.pump();
+      expect(tester.getRect(texture), rect);
+    }
+    expect(scrolls, 3);
+    expect(player.pauses, 0);
+    expect(player.plays, 0);
+  });
+
   for (final delayed in ['dimensions', 'texture', 'frame']) {
     testWidgets('frame readiness waits for $delayed and a surface frame', (
       tester,
@@ -223,7 +259,7 @@ void main() {
       });
       harness.controllers.value = controller;
       await tester.pumpWidget(harness.build());
-      player.state = player.state.copyWith(playing: playing);
+      player.state.playing = playing;
       // No pump between hidden/paused: Android can suspend Flutter frames while
       // the outgoing video surface is still observing the old native player.
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);

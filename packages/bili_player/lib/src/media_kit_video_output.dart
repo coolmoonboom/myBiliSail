@@ -49,8 +49,8 @@ final class MediaKitVideoOutput
           rect.width > 0 &&
           rect.height > 0 &&
           (rect.width > 1 || rect.height > 1) &&
-          (state.width ?? 0) > 0 &&
-          (state.height ?? 0) > 0;
+          state.width > 0 &&
+          state.height > 0;
     }
 
     void update() {
@@ -72,13 +72,11 @@ final class MediaKitVideoOutput
 
     controller.id.addListener(update);
     controller.rect.addListener(update);
-    final width = controller.player.stream.width.listen((_) => update());
-    final height = controller.player.stream.height.listen((_) => update());
+    final size = controller.player.stream.size.listen((_) => update());
     _readinessCleanup.addAll([
       () => controller.id.removeListener(update),
       () => controller.rect.removeListener(update),
-      () => unawaited(width.cancel()),
-      () => unawaited(height.cancel()),
+      () => unawaited(size.cancel()),
     ]);
     unawaited(
       controller.waitUntilFirstFrameRendered.then(
@@ -108,6 +106,12 @@ final class MediaKitVideoOutput
   int _sourceGeneration = 0;
   bool _disposed = false;
   VideoDimensions? _videoDimensions;
+  bool _androidDolbyVision = false;
+  Future<void> _androidSurfaceSize = Future.value();
+  bool _androidSurfaceSizeFailed = false;
+  int _androidSurfaceRevision = 0;
+
+  void enableAndroidDolbyVision() => _androidDolbyVision = true;
 
   VideoDimensions? get dimensions {
     final rect = _controller.value?.rect.value;
@@ -124,43 +128,113 @@ final class MediaKitVideoOutput
         size.height > 0;
   }
 
-  Future<void> get firstFrameRendered {
+  Future<void> get firstFrameRendered async {
     final controller = _controller.value;
     if (controller == null) {
-      return Future.error(StateError('No video output is bound.'));
+      throw StateError('No video output is bound.');
     }
-    return controller.waitUntilFirstFrameRendered;
+    await controller.waitUntilFirstFrameRendered;
+    Future<void> pending;
+    do {
+      pending = _androidSurfaceSize;
+      await pending;
+    } while (!identical(pending, _androidSurfaceSize));
+    if (_androidSurfaceSizeFailed) {
+      throw StateError('Android Dolby Vision surface sizing failed.');
+    }
   }
 
-  void bindPlayer(
+  int _bindingRevision = 0;
+
+  Future<void> bindPlayer(
     mk.Player player, {
     required int generation,
     required VideoDecodingMode decoding,
-  }) {
+  }) async {
     if (_disposed) throw StateError('Video output is disposed.');
     _player = player;
     _sourceGeneration = generation;
-    final controller = mkv.VideoController(
+    final revision = ++_bindingRevision;
+    final controller = await mkv.VideoController.create(
       player,
       configuration: videoDecoderConfiguration(
         isAndroid: Platform.isAndroid,
         decoding: decoding,
+        usesDolbyVisionRenderer: () => _androidDolbyVision,
       ),
     );
-    // Retain early initialization errors for the engine's bounded output wait.
-    controller.platform.future.ignore();
+    if (_disposed ||
+        revision != _bindingRevision ||
+        !identical(_player, player)) {
+      return;
+    }
     _controller.value = controller;
+    _updateDecodedSize();
     final cap = _requestedViewport;
     if (Platform.isWindows && cap != null) _commitViewport(cap);
-    // A preview waits for output before mounting a surface. Initialization is
-    // post-frame, so an otherwise idle Flutter window must request that frame.
+    // A preview can initialize before mounting a surface. Ensure an otherwise
+    // idle window presents the newly bound texture and readiness callbacks.
     WidgetsBinding.instance.ensureVisualUpdate();
   }
 
   void updateVideoDimensions(VideoDimensions? dimensions) {
     if (_videoDimensions == dimensions) return;
     _videoDimensions = dimensions;
+    _updateDecodedSize();
     _updateViewportCap();
+  }
+
+  void _updateDecodedSize() {
+    final controller = _controller.value;
+    final dimensions = _videoDimensions;
+    if (Platform.isAndroid &&
+        controller?.configuration.vo == 'gpu-next' &&
+        dimensions != null) {
+      final player = _player;
+      if (player == null) return;
+      final revision = _bindingRevision;
+      final sizeRevision = ++_androidSurfaceRevision;
+      bool current() =>
+          !_disposed &&
+          revision == _bindingRevision &&
+          sizeRevision == _androidSurfaceRevision &&
+          identical(_player, player);
+      _androidSurfaceSizeFailed = false;
+      _androidSurfaceSize = () async {
+        try {
+          await _viewportChannel
+              .invokeMethod<void>('VideoOutputManager.SetSurfaceTextureSize', {
+                'handle': player.handle.toString(),
+                'width': dimensions.width.toString(),
+                'height': dimensions.height.toString(),
+              })
+              .timeout(const Duration(seconds: 2));
+          if (!current()) return;
+          player.setProperty(
+            'android-surface-size',
+            '${dimensions.width}x${dimensions.height}',
+          );
+        } on Object catch (error) {
+          if (current()) {
+            _androidSurfaceSizeFailed = true;
+            debugPrint('Android video size failed: ${error.runtimeType}');
+          }
+        }
+      }();
+      return;
+    }
+    if (!Platform.isWindows || controller == null || dimensions == null) return;
+    // PiliPlus's controller does not forward player size events. Our native
+    // viewport patch deliberately avoids synchronous mpv reads on this thread.
+    final result = controller.setSize(
+      width: dimensions.width,
+      height: dimensions.height,
+    );
+    unawaited(
+      result?.catchError((Object error) {
+        debugPrint('Windows decoded video size failed: ${error.runtimeType}');
+      }),
+    );
   }
 
   void advanceGeneration(int generation) {
@@ -169,10 +243,16 @@ final class MediaKitVideoOutput
   }
 
   void clearPlayer() {
+    _bindingRevision++;
     _sourceGeneration++;
     _viewportRevision++;
     _controller.value = null;
     _player = null;
+    _videoDimensions = null;
+    _androidDolbyVision = false;
+    _androidSurfaceSize = Future.value();
+    _androidSurfaceSizeFailed = false;
+    _androidSurfaceRevision++;
   }
 
   void cancelPendingViewport() => _viewportShrinkTimer?.cancel();
@@ -191,16 +271,20 @@ final class MediaKitVideoOutput
     valueListenable: _controller,
     builder: (context, controller, _) => controller == null
         ? const ColoredBox(color: Color(0xFF000000))
-        : mkv.Video(
-            // VideoState subscribes to its initial player's dimensions. A
-            // same-frame clear/rebind must not retain the old subscriptions.
-            key: ObjectKey(controller),
-            controller: controller,
-            controls: mkv.NoVideoControls,
-            // PlaybackSession owns lifecycle and the user's pause intent.
-            // The old surface may still be mounted while switching to audio.
-            pauseUponEnteringBackgroundMode: false,
-            resumeUponEnteringForegroundMode: false,
+        // The backend is a visual layer. Its built-in InteractiveViewer must
+        // not consume wheel signals or gestures owned by the host controls.
+        : IgnorePointer(
+            child: mkv.Video(
+              // VideoState subscribes to its initial player's dimensions. A
+              // same-frame clear/rebind must not retain the old subscriptions.
+              key: ObjectKey(controller),
+              controller: controller,
+              controls: mkv.NoVideoControls,
+              // PlaybackSession owns lifecycle and the user's pause intent.
+              // The old surface may still be mounted while switching to audio.
+              pauseUponEnteringBackgroundMode: false,
+              resumeUponEnteringForegroundMode: false,
+            ),
           ),
   );
 
@@ -318,8 +402,7 @@ final class MediaKitVideoOutput
   ) async {
     try {
       const deadline = Duration(seconds: 5);
-      await controller.platform.future.timeout(deadline);
-      final handle = await player.handle.timeout(deadline);
+      final handle = player.handle;
       if (_disposed ||
           generation != _sourceGeneration ||
           revision != _viewportRevision ||

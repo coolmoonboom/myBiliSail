@@ -16,6 +16,7 @@ import '../../../shared/ui/playback_navigation.dart';
 import '../../../shared/ui/width_layout_builder.dart';
 import '../../../shared/ui/app_dialog.dart';
 import '../../../shared/ui/danmaku_composer_draft.dart';
+import '../../../shared/ui/player_controls_menu_scope.dart';
 import '../../../shared/ui/smooth_scroll_behavior.dart';
 import '../../../domain/video.dart';
 import '../../../domain/playback_rates.dart';
@@ -29,6 +30,8 @@ import '../domain/playback_repository.dart';
 import '../domain/content_playback.dart';
 import 'player_settings_dialog.dart';
 import 'player_danmaku_dialog.dart';
+import 'player_more_dialog.dart';
+import 'player_control_labels.dart';
 import 'casting_dialog.dart';
 import '../application/casting_controller.dart';
 import 'player_swipe_controls.dart';
@@ -208,6 +211,7 @@ class _PlaybackPanelState extends ConsumerState<PlaybackPanel>
     scheduleMicrotask(() {
       final commands = _pageCommands.value;
       if (!mounted ||
+          !_session.canAutoAdvance ||
           !_session.ownsPlayback(this) ||
           _session.isLive ||
           _session.contentTarget is OfflinePlaybackTarget ||
@@ -803,6 +807,8 @@ class _PlayerViewState extends State<_PlayerView> with WidgetsBindingObserver {
   bool _composeExpanded = false;
   final GlobalKey _composerKey = GlobalKey();
   Timer? _controlsHideTimer;
+  Timer? _cursorHideTimer;
+  final _cursorHidden = ValueNotifier(false);
   final Set<int> _pressedPointers = {};
   final Set<String> _hoveredControlRegions = {};
   bool _mouseInside = false;
@@ -812,6 +818,8 @@ class _PlayerViewState extends State<_PlayerView> with WidgetsBindingObserver {
   int _openControlsMenus = 0;
   ModalRoute<void>? _composerDialogRoute;
   bool _composerDialogOpen = false;
+  ModalRoute<void>? _moreDialogRoute;
+  bool _moreDialogOpen = false;
   late int _sourceGeneration;
   late bool _hasError;
   late PlayerControlsMode _controlsMode;
@@ -857,6 +865,7 @@ class _PlayerViewState extends State<_PlayerView> with WidgetsBindingObserver {
     _sourceGeneration = generation;
     _hasError = hasError;
     _dismissComposerDialog();
+    _dismissMoreDialog();
     if (!_dynamicControls) _scheduleControlsHide();
   }
 
@@ -899,7 +908,10 @@ class _PlayerViewState extends State<_PlayerView> with WidgetsBindingObserver {
   void didUpdateWidget(covariant _PlayerView oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.active != widget.active) {
-      if (!widget.active) _dismissComposerDialog();
+      if (!widget.active) {
+        _dismissComposerDialog();
+        _dismissMoreDialog();
+      }
       _swipeSeekPreview.value = null;
       _syncHighEnergyVisibility();
       _mouseInside = false;
@@ -921,7 +933,10 @@ class _PlayerViewState extends State<_PlayerView> with WidgetsBindingObserver {
   @override
   void dispose() {
     _dismissComposerDialog();
+    _dismissMoreDialog();
     _controlsHideTimer?.cancel();
+    _cursorHideTimer?.cancel();
+    _cursorHidden.dispose();
     _pressedPointers.clear();
     WidgetsBinding.instance.removeObserver(this);
     widget.settings.removeListener(_onSettingsChanged);
@@ -936,6 +951,7 @@ class _PlayerViewState extends State<_PlayerView> with WidgetsBindingObserver {
   }
 
   void _scheduleControlsHide() {
+    _scheduleCursorHide();
     _controlsHideTimer?.cancel();
     _controlsHideTimer = null;
     if (!mounted ||
@@ -959,6 +975,29 @@ class _PlayerViewState extends State<_PlayerView> with WidgetsBindingObserver {
         }
       },
     );
+  }
+
+  void _scheduleCursorHide() {
+    if (!mounted) return;
+    _cursorHideTimer?.cancel();
+    _cursorHideTimer = null;
+    _cursorHidden.value = false;
+    if (!mounted ||
+        !widget.fullScreen ||
+        !widget.active ||
+        !_appActive ||
+        _pressedPointers.isNotEmpty ||
+        _hoveredControlRegions.isNotEmpty ||
+        _openControlsMenus > 0 ||
+        _controlEditorFocused) {
+      return;
+    }
+    // Click mode can keep controls hidden while the pointer is moving. Track
+    // cursor idleness separately so movement restores it without opening UI.
+    _cursorHideTimer = Timer(const Duration(milliseconds: 2500), () {
+      _cursorHideTimer = null;
+      if (mounted) _cursorHidden.value = true;
+    });
   }
 
   void _showDynamicControls() {
@@ -996,6 +1035,7 @@ class _PlayerViewState extends State<_PlayerView> with WidgetsBindingObserver {
   }
 
   void _onPointerDown(PointerDownEvent event) {
+    _scheduleCursorHide();
     final touchHold =
         !widget.session.isLive && event.kind == PointerDeviceKind.touch;
     if (!touchHold) return;
@@ -1111,6 +1151,55 @@ class _PlayerViewState extends State<_PlayerView> with WidgetsBindingObserver {
     }
   }
 
+  void _dismissMoreDialog() {
+    final route = _moreDialogRoute;
+    _moreDialogRoute = null;
+    if (route == null) return;
+    scheduleMicrotask(() {
+      if (route.isActive) route.navigator?.removeRoute(route);
+    });
+  }
+
+  Future<void> _openMoreDialog() async {
+    if (_moreDialogOpen || !widget.active) return;
+    _moreDialogOpen = true;
+    final container = ProviderScope.containerOf(context);
+    widget.shortcuts.cancel();
+    _onControlsMenuChanged(true);
+    try {
+      await showAppDialog<void>(
+        context: context,
+        barrierColor: Colors.transparent,
+        useSafeArea: false,
+        builder: (context) {
+          _moreDialogRoute = ModalRoute.of<void>(context);
+          return UncontrolledProviderScope(
+            container: container,
+            child: Theme(
+              data: _playerControlsTheme(context),
+              child: PlayerMoreDialog(
+                session: widget.session,
+                playerBounds: () {
+                  final box = _playerBoundsKey.currentContext
+                      ?.findRenderObject();
+                  return box is RenderBox && box.hasSize
+                      ? box.localToGlobal(Offset.zero) & box.size
+                      : null;
+                },
+                onSettings: _openSettings,
+              ),
+            ),
+          );
+        },
+      );
+    } finally {
+      _moreDialogRoute = null;
+      _moreDialogOpen = false;
+      widget.shortcuts.cancel();
+      _onControlsMenuChanged(false);
+    }
+  }
+
   Widget _controlsVisibility({
     required bool visible,
     required String hoverRegion,
@@ -1156,10 +1245,26 @@ class _PlayerViewState extends State<_PlayerView> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     if (!widget.active) return const ColoredBox(color: Colors.black);
-    return MouseRegion(
-      onEnter: _onMouseEnter,
-      onHover: (_) => _onMouseActivity(),
-      onExit: _onMouseExit,
+    return ListenableBuilder(
+      listenable: Listenable.merge([
+        widget.controlsVisible,
+        _cursorHidden,
+        widget.session,
+      ]),
+      builder: (context, child) => MouseRegion(
+        cursor:
+            widget.fullScreen &&
+                _appActive &&
+                !widget.session.audioOnly &&
+                !widget.controlsVisible.value &&
+                _cursorHidden.value
+            ? SystemMouseCursors.none
+            : MouseCursor.defer,
+        onEnter: _onMouseEnter,
+        onHover: (_) => _onMouseActivity(),
+        onExit: _onMouseExit,
+        child: child,
+      ),
       child: Listener(
         onPointerSignal: _onSurfacePointerSignal,
         onPointerDown: _onPointerDown,
@@ -1191,7 +1296,8 @@ class _PlayerViewState extends State<_PlayerView> with WidgetsBindingObserver {
           media != null && (session.isLive || media.qualities.length > 1)
           ? session.isLive
                 ? liveQualityLabel(session, media)
-                : media.qualityLabels[media.quality] ?? _quality(media.quality)
+                : media.qualityLabels[media.quality] ??
+                      playbackQualityLabel(media.quality)
           : null,
       hasComposer: widget.danmakuComposerBuilder != null,
       hasSubtitles: session.subtitleTracks.isNotEmpty,
@@ -1446,7 +1552,10 @@ class _PlayerViewState extends State<_PlayerView> with WidgetsBindingObserver {
                                         key: const ValueKey(
                                           'player-surface-tap-target',
                                         ),
-                                        behavior: HitTestBehavior.translucent,
+                                        // Keep backend surface gestures out of
+                                        // this arena; media-kit's scale recognizer
+                                        // can claim a swipe before our drags.
+                                        behavior: HitTestBehavior.opaque,
                                         onTap: _onSurfaceTap,
                                         onDoubleTapDown: (details) =>
                                             _doubleTapKind = details.kind,
@@ -1556,14 +1665,14 @@ class _PlayerViewState extends State<_PlayerView> with WidgetsBindingObserver {
                                   retainDynamicPress: true,
                                   child: _PlayerTopBar(
                                     navigation: widget.navigation,
-                                    showNavigation: true,
+                                    smallWindow: smallWindow,
+                                    onMore: _openMoreDialog,
                                     fullScreen: widget.fullScreen,
                                     onExitFullScreen: _toggleFullScreen,
                                     onNavigate: widget.onNavigate,
-                                    viewers: viewers,
+                                    viewers: smallWindow ? null : viewers,
                                     session: session,
                                     onSettings: _openSettings,
-                                    onMenuChanged: _onControlsMenuChanged,
                                   ),
                                 ),
                               ),
@@ -1603,17 +1712,23 @@ class _PlayerViewState extends State<_PlayerView> with WidgetsBindingObserver {
                                     snapshot.phase != PlaybackPhase.ended &&
                                         snapshot.isBuffering ||
                                     snapshot.phase == PlaybackPhase.opening))
-                              const Center(
+                              Center(
                                 child: Column(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    CircularProgressIndicator(
+                                    const CircularProgressIndicator(
                                       color: Colors.white,
                                     ),
-                                    SizedBox(height: 14),
+                                    const SizedBox(height: 14),
                                     Text(
-                                      '正在准备音视频…',
-                                      style: TextStyle(
+                                      session.isRecovering
+                                          ? '正在恢复播放…'
+                                          : session.isResolving ||
+                                                snapshot.phase ==
+                                                    PlaybackPhase.opening
+                                          ? '正在准备音视频…'
+                                          : '网络缓冲中…',
+                                      style: const TextStyle(
                                         color: Colors.white70,
                                         fontSize: 13,
                                       ),
@@ -1898,66 +2013,88 @@ class _PlayerViewState extends State<_PlayerView> with WidgetsBindingObserver {
                                                     ),
                                                   ),
                                                 if (!session.isLive)
-                                                  PlaybackSnapshotBuilder(
-                                                    snapshots:
-                                                        session.snapshots,
-                                                    select: (snapshot) => (
-                                                      snapshot.position,
-                                                      snapshot.duration,
-                                                      snapshot.buffered,
-                                                    ),
-                                                    builder: (context, snapshot) => ValueListenableBuilder<Duration?>(
-                                                      valueListenable:
-                                                          _swipeSeekPreview,
-                                                      builder: (context, preview, _) => PlaybackTimelineBar(
-                                                        key: ValueKey(
-                                                          session
-                                                              .sourceGeneration,
+                                                  ValueListenableBuilder(
+                                                    valueListenable:
+                                                        session.highEnergy,
+                                                    builder: (context, trend, _) => SizedBox(
+                                                      width: double.infinity,
+                                                      height:
+                                                          PlaybackTimelineBar.heightFor(
+                                                            width: width,
+                                                            duration: snapshot
+                                                                .duration,
+                                                            chapters: session
+                                                                .chapters,
+                                                            trend: trend,
+                                                          ),
+                                                      child: PlaybackSnapshotBuilder(
+                                                        snapshots:
+                                                            session.snapshots,
+                                                        select: (snapshot) => (
+                                                          snapshot.position,
+                                                          snapshot.duration,
+                                                          snapshot.buffered,
                                                         ),
-                                                        playerBoundsKey:
-                                                            _playerBoundsKey,
-                                                        position:
-                                                            preview ??
-                                                            snapshot.position,
-                                                        duration:
-                                                            snapshot.duration,
-                                                        buffered:
-                                                            snapshot.buffered,
-                                                        chapters:
-                                                            session.chapters,
-                                                        highEnergy:
-                                                            session.highEnergy,
-                                                        storyboard:
-                                                            session.storyboard,
-                                                        storyboardLoading: session
-                                                            .storyboardLoading,
-                                                        storyboardMessage: session
-                                                            .storyboardMessage,
-                                                        sourceGeneration: session
-                                                            .sourceGeneration,
-                                                        onPreviewRequest: () =>
-                                                            unawaited(
+                                                        builder: (context, snapshot) => ValueListenableBuilder<Duration?>(
+                                                          valueListenable:
+                                                              _swipeSeekPreview,
+                                                          builder: (context, preview, _) => PlaybackTimelineBar(
+                                                            key: ValueKey(
                                                               session
-                                                                  .ensureStoryboard(),
+                                                                  .sourceGeneration,
                                                             ),
-                                                        onSeek: (position) async {
-                                                          if (widget.active &&
-                                                              _appActive &&
-                                                              session.sourceGeneration ==
-                                                                  sourceGeneration &&
-                                                              !session
-                                                                  .isResolving &&
-                                                              session.media !=
-                                                                  null &&
-                                                              session.error ==
-                                                                  null) {
-                                                            await session.seek(
-                                                              position,
-                                                            );
-                                                          }
-                                                        },
-                                                        onMenuChanged:
-                                                            _onControlsMenuChanged,
+                                                            playerBoundsKey:
+                                                                _playerBoundsKey,
+                                                            position:
+                                                                preview ??
+                                                                snapshot
+                                                                    .position,
+                                                            duration: snapshot
+                                                                .duration,
+                                                            buffered: snapshot
+                                                                .buffered,
+                                                            chapters: session
+                                                                .chapters,
+                                                            highEnergy: session
+                                                                .highEnergy,
+                                                            storyboard: session
+                                                                .storyboard,
+                                                            storyboardLoading:
+                                                                session
+                                                                    .storyboardLoading,
+                                                            storyboardMessage:
+                                                                session
+                                                                    .storyboardMessage,
+                                                            sourceGeneration:
+                                                                session
+                                                                    .sourceGeneration,
+                                                            onPreviewRequest:
+                                                                () => unawaited(
+                                                                  session
+                                                                      .ensureStoryboard(),
+                                                                ),
+                                                            onSeek: (position) async {
+                                                              if (widget
+                                                                      .active &&
+                                                                  _appActive &&
+                                                                  session.sourceGeneration ==
+                                                                      sourceGeneration &&
+                                                                  !session
+                                                                      .isResolving &&
+                                                                  session.media !=
+                                                                      null &&
+                                                                  session.error ==
+                                                                      null) {
+                                                                await session
+                                                                    .seek(
+                                                                      position,
+                                                                    );
+                                                              }
+                                                            },
+                                                            onMenuChanged:
+                                                                _onControlsMenuChanged,
+                                                          ),
+                                                        ),
                                                       ),
                                                     ),
                                                   ),
@@ -2239,17 +2376,23 @@ class _ControlBar extends StatelessWidget {
       onFocus: onFocus,
       shortcuts: settings.shortcuts,
     );
-    final time = PlaybackSnapshotBuilder(
-      snapshots: session.snapshots,
-      select: (snapshot) =>
-          (snapshot.position.inSeconds, snapshot.duration.inSeconds),
-      builder: (context, snapshot) => Text(
-        session.isLive
-            ? '直播中'
-            : '${_time(snapshot.position)} / ${_time(snapshot.duration)}',
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: const TextStyle(color: Colors.white70, fontSize: 11),
+    final time = SizedBox(
+      width: layout.timeWidth,
+      height: layout.timeHeight,
+      child: PlaybackSnapshotBuilder(
+        snapshots: session.snapshots,
+        select: (snapshot) =>
+            (snapshot.position.inSeconds, snapshot.duration.inSeconds),
+        builder: (context, snapshot) => RepaintBoundary(
+          child: Text(
+            session.isLive
+                ? '直播中'
+                : '${_time(snapshot.position)} / ${_time(snapshot.duration)}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: Colors.white70, fontSize: 11),
+          ),
+        ),
       ),
     );
     final fullscreenButton = IconButton(
@@ -2296,11 +2439,11 @@ class _ControlBar extends StatelessWidget {
           CheckedPopupMenuItem(
             value: i,
             checked: session.selectedSubtitle == i,
-            child: Text(_subtitleLabel(session.subtitleTracks[i])),
+            child: Text(playbackSubtitleLabel(session.subtitleTracks[i])),
           ),
       ],
     );
-    final volumeButton = PopupMenuButton<void>(
+    final volumeButton = PopupMenuButton<AudioQualityPreference>(
       tooltip: '音量',
       icon: Icon(
         snapshot.volume <= 0
@@ -2308,10 +2451,27 @@ class _ControlBar extends StatelessWidget {
             : Icons.volume_up_outlined,
         size: 20,
       ),
-      itemBuilder: (_) => [_VolumeSliderEntry(session: session)],
+      itemBuilder: (_) => [
+        _VolumeSliderEntry(session: session),
+        if (!session.isLive &&
+            media != null &&
+            media.audioTracks.isNotEmpty) ...[
+          const PopupMenuDivider(),
+          const PopupMenuItem(enabled: false, child: Text('音质')),
+          for (final option in media.audioTracks)
+            CheckedPopupMenuItem(
+              value: option.quality,
+              checked: option.quality == media.audioQuality,
+              child: Text(playbackAudioQualityLabel(option.quality)),
+            ),
+        ],
+      ],
       onOpened: () => onMenuChanged(true),
       onCanceled: () => onMenuChanged(false),
-      onSelected: (_) => onMenuChanged(false),
+      onSelected: (quality) {
+        onMenuChanged(false);
+        unawaited(session.changeAudioQuality(quality));
+      },
     );
     Widget slot(Widget child, [double width = _ControlsLayout.buttonWidth]) =>
         SizedBox(width: width, height: 40, child: child);
@@ -2320,10 +2480,12 @@ class _ControlBar extends StatelessWidget {
         ? null
         : KeyedSubtree(
             key: composerKey,
-            child: Builder(builder: composerBuilder),
+            child: PlayerControlsMenuScope(
+              onChanged: onMenuChanged,
+              child: Builder(builder: composerBuilder),
+            ),
           );
-    final secondary = <Widget>[
-      slot(danmakuButton),
+    final qualityAndRate = <Widget>[
       if (media != null && session.isLive)
         slot(
           LiveStreamMenuButton(
@@ -2349,7 +2511,8 @@ class _ControlBar extends StatelessWidget {
                 PopupMenuItem(
                   value: quality,
                   child: Text(
-                    media.qualityLabels[quality] ?? _quality(quality),
+                    media.qualityLabels[quality] ??
+                        playbackQualityLabel(quality),
                   ),
                 ),
             ],
@@ -2357,7 +2520,8 @@ class _ControlBar extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 8),
               child: Center(
                 child: Text(
-                  media.qualityLabels[media.quality] ?? _quality(media.quality),
+                  media.qualityLabels[media.quality] ??
+                      playbackQualityLabel(media.quality),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 12, color: Colors.white),
@@ -2367,6 +2531,15 @@ class _ControlBar extends StatelessWidget {
           ),
           layout.qualityWidth,
         ),
+      if (!session.isLive)
+        slot(
+          _PlayerRateButton(session: session, onMenuChanged: onMenuChanged),
+          layout.rateWidth,
+        ),
+    ];
+    final secondary = <Widget>[
+      slot(danmakuButton),
+      ...qualityAndRate,
       if (session.subtitleTracks.isNotEmpty) slot(subtitleButton),
       if (session.voiceTracks.isNotEmpty)
         slot(
@@ -2388,7 +2561,7 @@ class _ControlBar extends StatelessWidget {
                 CheckedPopupMenuItem(
                   value: voice.key,
                   checked: voice.key == session.selectedVoice.key,
-                  child: Text(_voiceLabel(voice)),
+                  child: Text(playbackVoiceLabel(voice)),
                 ),
             ],
           ),
@@ -2430,7 +2603,8 @@ class _ControlBar extends StatelessWidget {
                 ),
               ),
               Expanded(
-                child: _ScrollablePlayerTools(
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
                   children: [
                     if (composer != null)
                       slot(
@@ -2440,7 +2614,7 @@ class _ControlBar extends StatelessWidget {
                           icon: const Icon(Icons.edit_outlined, size: 20),
                         ),
                       ),
-                    ...secondary,
+                    slot(danmakuButton),
                   ],
                 ),
               ),
@@ -2459,7 +2633,8 @@ class _ControlBar extends StatelessWidget {
         4 +
         (composer != null ? 1 : 0) +
         (showPlayInBar ? 1 : 0) +
-        (showNext ? 1 : 0);
+        (showNext ? 1 : 0) +
+        (session.isLive ? 0 : 2);
     final timeAboveRow =
         layout.compact &&
         layout.inputs.width <
@@ -2473,7 +2648,8 @@ class _ControlBar extends StatelessWidget {
               if (showPlayInBar) slot(play),
               if (showNext)
                 slot(_NextButton(session: session, commands: pageCommands)),
-              if (timeAboveRow) const Spacer() else Expanded(child: time),
+              if (!timeAboveRow) SizedBox(width: layout.timeWidth, child: time),
+              Expanded(child: _ScrollablePlayerTools(children: qualityAndRate)),
               slot(danmakuButton),
               if (composer != null)
                 slot(
@@ -2605,9 +2781,22 @@ class _ControlBar extends StatelessWidget {
                 }
               },
               child: Text(
-                '清晰度 ${media.qualityLabels[quality] ?? _quality(quality)}',
+                '清晰度 ${media.qualityLabels[quality] ?? playbackQualityLabel(quality)}',
               ),
             ),
+        if (!session.isLive && media.audioTracks.isNotEmpty) ...[
+          const PopupMenuDivider(),
+          for (final option in media.audioTracks)
+            CheckedPopupMenuItem(
+              checked: option.quality == media.audioQuality,
+              value: () {
+                if (session.media == media) {
+                  unawaited(session.changeAudioQuality(option.quality));
+                }
+              },
+              child: Text('音质 ${playbackAudioQualityLabel(option.quality)}'),
+            ),
+        ],
         if (session.isLive) ...[
           CheckedPopupMenuItem(
             checked: session.requestedQuality == 0,
@@ -2640,7 +2829,7 @@ class _ControlBar extends StatelessWidget {
           CheckedPopupMenuItem(
             value: () => unawaited(session.selectSubtitle(i)),
             checked: session.selectedSubtitle == i,
-            child: Text(_subtitleLabel(session.subtitleTracks[i])),
+            child: Text(playbackSubtitleLabel(session.subtitleTracks[i])),
           ),
       ],
       if (session.voiceTracks.isNotEmpty) ...[
@@ -2649,7 +2838,7 @@ class _ControlBar extends StatelessWidget {
           CheckedPopupMenuItem(
             value: () => unawaited(session.changeVoice(voice)),
             checked: voice.key == session.selectedVoice.key,
-            child: Text('语音 ${_voiceLabel(voice)}'),
+            child: Text('语音 ${playbackVoiceLabel(voice)}'),
           ),
       ],
     ],
@@ -2703,17 +2892,7 @@ class _ScrollablePlayerToolsState extends State<_ScrollablePlayerTools> {
   );
 }
 
-String _subtitleLabel(SubtitleTrack track) {
-  final label = track.label.isNotEmpty ? track.label : track.languageCode;
-  return track.type == 1
-      ? '$label · ${track.aiType == 1 ? 'AI 翻译' : 'AI'}'
-      : label;
-}
-
-String _voiceLabel(PlaybackVoice voice) =>
-    voice.productionType == 2 ? '${voice.label} · AI 翻译' : voice.label;
-
-class _VolumeSliderEntry extends PopupMenuEntry<void> {
+class _VolumeSliderEntry extends PopupMenuEntry<AudioQualityPreference> {
   const _VolumeSliderEntry({required this.session});
 
   final PlaybackSession session;
@@ -2722,7 +2901,7 @@ class _VolumeSliderEntry extends PopupMenuEntry<void> {
   double get height => 88;
 
   @override
-  bool represents(void value) => false;
+  bool represents(AudioQualityPreference? value) => false;
 
   @override
   State<_VolumeSliderEntry> createState() => _VolumeSliderEntryState();
@@ -2793,7 +2972,7 @@ typedef _ControlsLayoutInputs = ({
 // layouts, including long videos and optional quality/subtitle controls.
 class _ControlsLayout {
   _ControlsLayout(this.inputs) {
-    double textWidth(String text, double size) {
+    Size textSize(String text, double size) {
       final painter = TextPainter(
         text: TextSpan(
           text: text,
@@ -2802,18 +2981,23 @@ class _ControlsLayout {
         textDirection: inputs.textDirection,
         textScaler: inputs.textScaler,
       )..layout();
-      final result = painter.width.ceilToDouble() + 2;
+      final result = painter.size;
       painter.dispose();
       return result;
     }
 
-    timeWidth = textWidth(inputs.timeLabel, 11);
+    double textWidth(String text, double size) =>
+        textSize(text, size).width.ceilToDouble() + 2;
+    final timeSize = textSize(inputs.timeLabel, 11);
+    timeWidth = timeSize.width.ceilToDouble() + 2;
+    timeHeight = timeSize.height.ceilToDouble();
     qualityWidth = switch (inputs.qualityLabel) {
       final label? => textWidth(label, 12) + 16,
       null => 0,
     };
     composerMinWidth = 200 * inputs.textScaler.scale(12) / 12;
-    // Settings, listening, casting and playback rate live in the top bar.
+    rateWidth = inputs.isLive ? 0 : textWidth('3.0x', 12) + 16;
+    // The rate follows quality in the bottom bar; other settings live on top.
     compact =
         inputs.width <
         buttonWidth *
@@ -2823,12 +3007,17 @@ class _ControlsLayout {
                     (inputs.hasVoices ? 1 : 0)) +
             timeWidth +
             qualityWidth +
+            rateWidth +
             12 +
             (inputs.hasComposer ? composerMinWidth : 0);
   }
   final _ControlsLayoutInputs inputs;
   static const buttonWidth = 40.0;
-  late final double timeWidth, qualityWidth, composerMinWidth;
+  late final double timeWidth,
+      timeHeight,
+      qualityWidth,
+      rateWidth,
+      composerMinWidth;
   late final bool compact;
 }
 
@@ -2901,19 +3090,6 @@ String _time(Duration value) {
   final minutes = seconds ~/ 60;
   return '${minutes.toString().padLeft(2, '0')}:${(seconds % 60).toString().padLeft(2, '0')}';
 }
-
-String _quality(int? quality) => switch (quality) {
-  120 => '4K',
-  116 => '1080P60',
-  112 => '1080P+',
-  80 => '1080P',
-  74 => '720P60',
-  64 => '720P',
-  32 => '480P',
-  16 => '360P',
-  null => '画质',
-  _ => '$quality',
-};
 
 class _WindowFullScreenState {
   Object? owner;
@@ -3008,24 +3184,24 @@ class _PlayerRateButton extends StatelessWidget {
 class _PlayerTopBar extends StatelessWidget {
   const _PlayerTopBar({
     required this.navigation,
-    required this.showNavigation,
+    required this.smallWindow,
+    required this.onMore,
     required this.fullScreen,
     required this.onExitFullScreen,
     required this.onNavigate,
     required this.viewers,
     required this.session,
     required this.onSettings,
-    required this.onMenuChanged,
   });
   final ValueListenable<PlaybackNavigation?> navigation;
-  final bool showNavigation;
+  final bool smallWindow;
+  final VoidCallback onMore;
   final bool fullScreen;
   final VoidCallback onExitFullScreen;
   final ValueChanged<VoidCallback> onNavigate;
   final String? viewers;
   final PlaybackSession session;
   final Future<void> Function(int) onSettings;
-  final ValueChanged<bool> onMenuChanged;
 
   Widget _action(
     String tooltip,
@@ -3058,8 +3234,7 @@ class _PlayerTopBar extends StatelessWidget {
     child: ValueListenableBuilder<PlaybackNavigation?>(
       valueListenable: navigation,
       builder: (context, actions, _) {
-        final showNavigationButtons =
-            showNavigation && (actions?.showInPlayer ?? false);
+        final showNavigationButtons = actions?.showInPlayer ?? false;
         final buttons = <Widget>[
           if (castRequestFor(session) != null)
             _action(
@@ -3073,19 +3248,12 @@ class _PlayerTopBar extends StatelessWidget {
               Icons.headphones_rounded,
               () => unawaited(session.setAudioOnly(true)),
             ),
-          if (!session.isLive)
-            SizedBox(
-              width: _ControlsLayout.buttonWidth,
-              height: 40,
-              child: _PlayerRateButton(
-                session: session,
-                onMenuChanged: onMenuChanged,
-              ),
-            ),
-          _action('弹幕配置', Icons.tune, () => unawaited(onSettings(1))),
-          if (!session.isLive)
+          if (!smallWindow)
+            _action('弹幕配置', Icons.tune, () => unawaited(onSettings(1))),
+          if (!smallWindow && !session.isLive)
             _action('字幕样式', Icons.text_fields, () => unawaited(onSettings(2))),
           _action('播放配置', BiliIcons.settings, () => unawaited(onSettings(0))),
+          if (smallWindow) _action('更多播放选项', Icons.more_horiz, onMore),
         ];
         return LayoutBuilder(
           builder: (context, constraints) {

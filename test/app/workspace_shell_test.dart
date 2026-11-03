@@ -22,6 +22,43 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 
 void main() {
+  for (final mode in WorkspaceNavigationMode.values) {
+    _workspaceTestWidgets(
+      'submitted search clears across navigation in $mode',
+      (tester) async {
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = const Size(1200, 800);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        addTearDown(tester.view.resetPhysicalSize);
+        final router = _router(
+          (_, tab) => Text('page ${tab.location.path}'),
+          navigationMode: mode,
+        );
+        addTearDown(router.dispose);
+        await tester.pumpWidget(InputTestApp.router(routerConfig: router));
+        await tester.pumpAndSettle();
+        router.go('/search?q=existing');
+        await tester.pumpAndSettle();
+        final search = find.byKey(const ValueKey('workspace-search'));
+        expect(tester.widget<TextField>(search).controller!.text, isEmpty);
+        await tester.enterText(search, ' 新关键词 ');
+        await tester.testTextInput.receiveAction(TextInputAction.search);
+        await tester.pumpAndSettle();
+        expect(
+          router.routeInformationProvider.value.uri.queryParameters['q'],
+          '新关键词',
+        );
+        expect(tester.widget<TextField>(search).controller!.text, isEmpty);
+        router.go('/dynamic');
+        await tester.pumpAndSettle();
+        router.go('/search?q=新关键词');
+        await tester.pumpAndSettle();
+        expect(tester.widget<TextField>(search).controller!.text, isEmpty);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
   final returnToPlayback = find.byKey(
     const ValueKey('workspace-return-to-playback'),
   );
@@ -977,7 +1014,7 @@ void main() {
       expect(find.byKey(const ValueKey('workspace-tab-strip')), findsOneWidget);
       expect(
         tester.getTopLeft(find.byKey(const ValueKey('workspace-search'))).dy,
-        65,
+        64,
       );
       expect(find.byKey(const ValueKey('new-workspace-tab')), findsOneWidget);
       await tester.tap(find.text('count 0'));
@@ -1890,40 +1927,44 @@ GoRouter _router(
   routes: [
     ShellRoute(
       observers: [],
-      builder: (context, state, child) => BiliAppShell(
-        shortcuts: shortcuts,
-        navigationMode: navigationMode,
-        location: state.uri.toString(),
-        accountBuilder: accountBuilder,
-        pageBuilder: (context, tab) => tab.location.path == '/search'
-            ? ProviderScope(
-                overrides: [
-                  searchRepositoryProvider.overrideWithValue(
-                    _ShellSearchRepository(),
+      builder: (context, state, child) => ProviderScope(
+        child: BiliAppShell(
+          shortcuts: shortcuts,
+          navigationMode: navigationMode,
+          location: state.uri.toString(),
+          accountBuilder: accountBuilder,
+          pageBuilder: (context, tab) => tab.location.path == '/search'
+              ? ProviderScope(
+                  overrides: [
+                    searchRepositoryProvider.overrideWithValue(
+                      _ShellSearchRepository(),
+                    ),
+                  ],
+                  child: Builder(
+                    builder: (context) => WorkspacePageHeader.wrap(
+                      context,
+                      builder(context, tab),
+                    ),
                   ),
-                ],
-                child: Builder(
-                  builder: (context) =>
-                      WorkspacePageHeader.wrap(context, builder(context, tab)),
-                ),
-              )
-            : builder(context, tab),
-        windowControlsBuilder: customCaption && workspaceHeaderVisible
-            ? (_) => const SizedBox(
-                key: ValueKey('caption-controls'),
-                width: 138,
-                height: 42,
-              )
-            : null,
-        dragRegionBuilder: customCaption && workspaceHeaderVisible
-            ? (_, child) => GestureDetector(
-                key: const ValueKey('caption-drag-region'),
-                behavior: HitTestBehavior.translucent,
-                onPanStart: (_) => onWindowDrag?.call(),
-                child: child,
-              )
-            : null,
-        child: child,
+                )
+              : builder(context, tab),
+          windowControlsBuilder: customCaption && workspaceHeaderVisible
+              ? (_) => const SizedBox(
+                  key: ValueKey('caption-controls'),
+                  width: 138,
+                  height: 42,
+                )
+              : null,
+          dragRegionBuilder: customCaption && workspaceHeaderVisible
+              ? (_, child) => GestureDetector(
+                  key: const ValueKey('caption-drag-region'),
+                  behavior: HitTestBehavior.translucent,
+                  onPanStart: (_) => onWindowDrag?.call(),
+                  child: child,
+                )
+              : null,
+          child: child,
+        ),
       ),
       routes: [
         for (final path in [

@@ -24,11 +24,359 @@ import 'package:bilisail/features/playback/domain/content_playback.dart';
 import 'package:bilisail/features/playback/domain/sponsor_repository.dart';
 import 'package:bilisail/features/playback/domain/playback_history_repository.dart';
 import 'package:bilisail/features/settings/domain/app_settings.dart';
+import 'package:bilisail/core/storage/app_database.dart';
+import 'package:bilisail/features/settings/application/settings_controller.dart';
+import 'package:bilisail/features/settings/data/sqlite_settings_repository.dart';
+import 'package:drift/native.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:bili_player/bili_player.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  for (final target in <ContentPlaybackTarget?>[
+    null,
+    const PgcPlaybackTarget('12'),
+  ]) {
+    for (final playing in [false, true]) {
+      test(
+        'unsupported video color falls back once with transport retained target=$target playing=$playing',
+        () async {
+          final engine = _FakeEngine()
+            ..nextOpenFailure = PlayerFailureKind.unsupportedVideoColor;
+          final repository = _FakeRepository(autoResolve: true)
+            ..mediaForQuality = _colorMedia;
+          final content = _FakeContentRepository()
+            ..mediaForQuality = _colorMedia;
+          final session = PlaybackSession(
+            engine: engine,
+            repository: repository,
+            contentRepository: content,
+            progress: _FakeProgress(),
+            accountScope: () => 'guest',
+          );
+          addTearDown(session.close);
+          session.configureSettings(
+            const AppSettings.defaults().copyWith(
+              preferredVideoCodec: VideoCodecPreference.dolbyVision,
+            ),
+          );
+          await session.open(
+            _detail('one'),
+            _part('one'),
+            target: target,
+            quality: 126,
+            desiredPlaying: playing,
+            position: const Duration(seconds: 17),
+            rate: 1.5,
+            volume: 36,
+          );
+          expect(engine.openOptions, hasLength(2));
+          expect(session.media?.quality, 125);
+          expect(session.media?.video.codec, 'hev1');
+          expect(session.error, isNull);
+          expect(session.auxiliaryMessage, contains('兼容视频流'));
+          expect(engine.currentSnapshot.position, const Duration(seconds: 17));
+          expect(engine.currentSnapshot.rate, 1.5);
+          expect(engine.currentSnapshot.volume, 36);
+          expect(engine.currentSnapshot.desiredPlaying, playing);
+          expect(target == null ? repository.qualities : content.qualities, [
+            126,
+            125,
+          ]);
+          expect(target == null ? repository.codecs : content.codecs, [
+            VideoCodecPreference.dolbyVision,
+            VideoCodecPreference.h264,
+          ]);
+          expect(engine.maxSimultaneousPlayers, 1);
+          await session.retry();
+          expect(
+            (target == null ? repository.codecs : content.codecs).last,
+            VideoCodecPreference.h264,
+          );
+          expect(session.error, isNull);
+        },
+      );
+    }
+  }
+
+  test(
+    'a failed compatibility stream does not recurse or retry a CDN',
+    () async {
+      final engine = _FakeEngine()
+        ..nextOpenFailure = PlayerFailureKind.unsupportedVideoColor;
+      engine.onOpenFailure = () =>
+          engine.nextOpenFailure = PlayerFailureKind.unsupportedVideoColor;
+      final repository = _FakeRepository(autoResolve: true)
+        ..mediaForQuality = _colorMedia;
+      final session = PlaybackSession(
+        engine: engine,
+        repository: repository,
+        progress: _FakeProgress(),
+        accountScope: () => 'guest',
+      );
+      addTearDown(session.close);
+      await session.open(_detail('one'), _part('one'), quality: 126);
+      await _flush();
+      expect(engine.openOptions, hasLength(2));
+      expect(repository.qualities, [126, 125]);
+      expect(session.error, contains('未取得兼容视频流'));
+      expect(session.media, isNull);
+    },
+  );
+
+  test('compatible source retains the remaining startup budget', () async {
+    var now = Duration.zero;
+    final engine = _FakeEngine()
+      ..nextOpenFailure = PlayerFailureKind.unsupportedVideoColor
+      ..onOpenFailure = () => now = const Duration(seconds: 20);
+    final session = PlaybackSession(
+      engine: engine,
+      repository: _FakeRepository(autoResolve: true)
+        ..mediaForQuality = _colorMedia,
+      progress: _FakeProgress(),
+      accountScope: () => 'guest',
+      startupNow: () => now,
+    );
+    addTearDown(session.close);
+    await session.open(_detail('one'), _part('one'), quality: 126);
+    expect(session.error, isNull);
+    expect(engine.openOptions, hasLength(2));
+    expect(engine.openOptions.last.openTimeout, const Duration(seconds: 15));
+  });
+
+  test(
+    'unsupported offline color never resolves an online replacement',
+    () async {
+      final engine = _FakeEngine()
+        ..nextOpenFailure = PlayerFailureKind.unsupportedVideoColor;
+      final repository = _FakeRepository(autoResolve: true);
+      final content = _FakeContentRepository()..mediaForQuality = _colorMedia;
+      final session = PlaybackSession(
+        engine: engine,
+        repository: repository,
+        contentRepository: content,
+        progress: _FakeProgress(),
+        accountScope: () => 'guest',
+      );
+      addTearDown(session.close);
+      await session.open(
+        null,
+        null,
+        target: const OfflinePlaybackTarget('download'),
+        quality: 126,
+      );
+      expect(engine.openOptions, hasLength(1));
+      expect(repository.qualities, isEmpty);
+      expect(content.qualities, [126]);
+      expect(session.error, contains('此离线视频的杜比视界格式'));
+    },
+  );
+
+  test(
+    'a replacement source cancels a pending compatible video response',
+    () async {
+      final engine = _FakeEngine()
+        ..nextOpenFailure = PlayerFailureKind.unsupportedVideoColor;
+      final repository = _FakeRepository(autoResolve: true)
+        ..mediaForQuality = _colorMedia;
+      engine.onOpenFailure = () => repository.autoResolve = false;
+      final session = PlaybackSession(
+        engine: engine,
+        repository: repository,
+        progress: _FakeProgress(),
+        accountScope: () => 'guest',
+      );
+      addTearDown(session.close);
+      final opening = session.open(_detail('one'), _part('one'), quality: 126);
+      await _flush();
+      expect(repository.qualities, [126, 125]);
+      final pending = repository.pendingResolves['one']!;
+      final cancellation = repository.resolveCancellations['one']!;
+      repository.autoResolve = true;
+      await session.open(_detail('two'), _part('two'));
+      expect(cancellation.isCancelled, isTrue);
+      pending.complete(_colorMedia(125));
+      await opening;
+      expect(session.part?.cid, 'two');
+      expect(engine.openOptions, hasLength(2));
+      expect(session.auxiliaryMessage, isNull);
+    },
+  );
+  for (final target in <ContentPlaybackTarget?>[
+    null,
+    const PgcPlaybackTarget('12'),
+  ]) {
+    for (final playing in [false, true]) {
+      test(
+        'manual audio quality retains transport and listening state target=$target playing=$playing',
+        () async {
+          final engine = _FakeEngine();
+          final repository = _FakeRepository(autoResolve: true)
+            ..resolvedMedia = _audioMedia();
+          final content = _FakeContentRepository()
+            ..resolvedMedia = _audioMedia();
+          final session = PlaybackSession(
+            engine: engine,
+            repository: repository,
+            contentRepository: content,
+            progress: _FakeProgress(),
+            accountScope: () => 'guest',
+          );
+          addTearDown(session.close);
+          await session.open(
+            _detail('one'),
+            _part('one'),
+            target: target,
+            desiredPlaying: playing,
+          );
+          await session.setRate(1.5);
+          await session.setVolume(36);
+          await session.seek(const Duration(seconds: 45));
+          await session.changeAudioQuality(AudioQualityPreference.lossless);
+          void expectChoice() {
+            expect(
+              session.media?.audioQuality,
+              AudioQualityPreference.lossless,
+            );
+            expect(
+              engine.currentSnapshot.position,
+              const Duration(seconds: 45),
+            );
+            expect(engine.currentSnapshot.rate, 1.5);
+            expect(engine.currentSnapshot.volume, 36);
+            expect(engine.currentSnapshot.desiredPlaying, playing);
+          }
+
+          expectChoice();
+          expect((engine.sources.last as DashPairSource).audio?.codec, 'fLaC');
+          await session.changeQuality(64);
+          expectChoice();
+          await session.retry();
+          expectChoice();
+          await session.setAudioOnly(true);
+          expectChoice();
+          expect(
+            (engine.sources.last as ProgressiveSource).media.codec,
+            'fLaC',
+          );
+          await session.setAudioOnly(false);
+          expectChoice();
+          final opens = engine.sources.length;
+          await session.changeAudioQuality(AudioQualityPreference.lossless);
+          await session.changeAudioQuality(AudioQualityPreference.dolby);
+          expect(engine.sources, hasLength(opens));
+        },
+      );
+    }
+  }
+  test('audio choice restores with navigation and falls back if the track disappears', () async {
+    final repository = _FakeRepository(autoResolve: true)
+      ..resolvedMedia = _audioMedia();
+    final session = PlaybackSession(
+      engine: _FakeEngine(),
+      repository: repository,
+      progress: _FakeProgress(),
+      accountScope: () => 'guest',
+    );
+    addTearDown(session.close);
+    final owner = Object();
+    session.attach(owner);
+    await session.activate(owner, _detail('one'), _part('one'));
+    await session.changeAudioQuality(AudioQualityPreference.lossless);
+    await session.activate(owner, _detail('two'), _part('two'));
+    expect(session.media?.audioQuality, AudioQualityPreference.aac192);
+    await session.activate(owner, _detail('one'), _part('one'));
+    expect(session.media?.audioQuality, AudioQualityPreference.lossless);
+    repository.resolvedMedia = _audioMedia(lossless: false);
+    await session.retry();
+    expect(session.media?.audioQuality, AudioQualityPreference.aac192);
+    expect(session.auxiliaryMessage, contains('音质当前不可用'));
+  });
+  test('late audio change cannot replace a new source', () async {
+    final repository = _FakeRepository(autoResolve: true)
+      ..resolvedMedia = _audioMedia();
+    final engine = _FakeEngine();
+    final session = PlaybackSession(
+      engine: engine,
+      repository: repository,
+      progress: _FakeProgress(),
+      accountScope: () => 'guest',
+    );
+    addTearDown(session.close);
+    await session.open(_detail('one'), _part('one'));
+    repository.autoResolve = false;
+    final changing = session.changeAudioQuality(
+      AudioQualityPreference.lossless,
+    );
+    await _flush();
+    repository.autoResolve = true;
+    await session.open(_detail('two'), _part('two'));
+    final opens = engine.sources.length;
+    repository.pendingResolves['one']!.complete(_audioMedia());
+    await changing;
+    expect(session.part?.cid, 'two');
+    expect(session.media?.audioQuality, AudioQualityPreference.aac192);
+    expect(engine.sources, hasLength(opens));
+  });
+  test('global send style follows new sessions, source changes and a settings restart', () async {
+    final database = AppDatabase(NativeDatabase.memory());
+    addTearDown(database.close);
+    ProviderContainer container() => ProviderContainer(
+      overrides: [
+        settingsRepositoryProvider.overrideWithValue(
+          SqliteSettingsRepository(database),
+        ),
+      ],
+    );
+    final firstRun = container();
+    addTearDown(firstRun.dispose);
+    await firstRun.read(settingsControllerProvider.future);
+    PlaybackSession session() {
+      final created = PlaybackSession(
+        engine: _FakeEngine(),
+        repository: _FakeRepository(autoResolve: true),
+        progress: _FakeProgress(),
+        accountScope: () => 'guest',
+      );
+      addTearDown(created.close);
+      return created;
+    }
+
+    final first = session(), second = session();
+    firstRun.listen(settingsControllerProvider, (_, next) {
+      if (next.value case final settings?) {
+        first.configureSettings(settings);
+        second.configureSettings(settings);
+      }
+    });
+    const chosen = (mode: 4, color: 0x0012ab);
+    await firstRun
+        .read(settingsControllerProvider.notifier)
+        .setDanmakuSendStyle(chosen);
+    await Future<void>.delayed(Duration.zero);
+    expect(first.danmakuSendStyle.value, chosen);
+    expect(second.danmakuSendStyle.value, chosen);
+    await first.open(_detail('one'), _part('one'));
+    await first.open(_detail('two'), _part('two'));
+    expect(first.danmakuSendStyle.value, chosen);
+    await first.close();
+    await second.close();
+    firstRun.dispose();
+
+    final nextRun = container();
+    addTearDown(nextRun.dispose);
+    final reloaded = await nextRun.read(settingsControllerProvider.future);
+    final reopened = session()..configureSettings(reloaded);
+    expect(reopened.danmakuSendStyle.value, chosen);
+    reopened.configureSettings(
+      reloaded.copyWith(theme: AppThemePreference.dark),
+    );
+    expect(reopened.danmakuSendStyle.value, chosen);
+    reopened.configureSettings(const AppSettings.defaults());
+    expect(reopened.danmakuSendStyle.value, (mode: 1, color: 0xffffff));
+  });
+
   for (final (mode, expected) in [
     (1, DanmakuMode.scroll),
     (4, DanmakuMode.bottom),
@@ -697,6 +1045,79 @@ void main() {
     expect(session.highEnergy.value, isNull);
     expect(session.error, isNull);
   });
+
+  for (final kind in [PlaybackMediaKind.liveHls, PlaybackMediaKind.liveFlv]) {
+    test('live buffering identity reaches the backend: $kind', () async {
+      final engine = _FakeEngine();
+      final content = _FakeContentRepository()
+        ..pending = (Completer<PlaybackMedia>()
+          ..complete(
+            PlaybackMedia(
+              video: PlaybackTrack(
+                urls: [Uri.parse('https://example.test/live')],
+                codec: 'avc',
+                bandwidth: 0,
+              ),
+              audio: null,
+              quality: 400,
+              qualities: const [400],
+              duration: Duration.zero,
+              headers: const {},
+              kind: kind,
+            ),
+          ));
+      final session = PlaybackSession(
+        engine: engine,
+        repository: _FakeRepository(),
+        contentRepository: content,
+        progress: _FakeProgress(),
+        accountScope: () => 'guest',
+      );
+      addTearDown(session.close);
+      await session.open(null, null, target: const LivePlaybackTarget('42'));
+      expect(session.error, isNull);
+      final source = engine.sources.single;
+      expect(switch (source) {
+        ManifestSource(:final isLive) ||
+        ProgressiveSource(:final isLive) => isLive,
+        _ => false,
+      }, isTrue);
+    });
+  }
+
+  for (final quality in AppSettings.supportedQualities) {
+    test(
+      'new video and PGC owners use configured default qn $quality',
+      () async {
+        final repository = _FakeRepository(autoResolve: true);
+        final content = _FakeContentRepository();
+        final session = PlaybackSession(
+          engine: _FakeEngine(),
+          repository: repository,
+          contentRepository: content,
+          progress: _FakeProgress(),
+          accountScope: () => 'guest',
+        );
+        addTearDown(session.close);
+        session.configureSettings(
+          AppSettings(preferredQuality: quality, resumePlayback: false),
+        );
+        final video = Object(), pgc = Object();
+        session.attach(video);
+        session.attach(pgc);
+        await session.activate(video, _detail('video'), _part('video'));
+        expect(repository.qualities.single, quality);
+        await session.activate(
+          pgc,
+          null,
+          null,
+          target: const PgcPlaybackTarget('7'),
+        );
+        expect(content.qualities.single, quality);
+        expect(session.requestedQuality, quality);
+      },
+    );
+  }
 
   for (final quality in [0, 250, 400, 20000]) {
     test('new live owner uses its own default qn $quality', () async {
@@ -2212,6 +2633,164 @@ void main() {
       expect(engine.seekTargets, isEmpty);
       shortcuts.dispose();
       await tester.runAsync(session.close);
+    },
+  );
+  for (final phase in [
+    PlaybackPhase.playing,
+    PlaybackPhase.paused,
+    PlaybackPhase.buffering,
+  ]) {
+    testWidgets(
+      'keyboard hold changes rate at its deadline without interrupting $phase',
+      (tester) async {
+        final engine = _FakeEngine();
+        final session = PlaybackSession(
+          engine: engine,
+          repository: _FakeRepository(autoResolve: true),
+          progress: _FakeProgress(),
+          accountScope: () => 'guest',
+        );
+        await tester.runAsync(() => session.open(_detail('1'), _part('1')));
+        engine.emit(
+          engine.currentSnapshot.copyWith(
+            phase: phase,
+            desiredPlaying: phase != PlaybackPhase.paused,
+            isBuffering: phase == PlaybackPhase.buffering,
+          ),
+        );
+        final before = engine.currentSnapshot;
+        final playCount = engine.playCount, pauseCount = engine.pauseCount;
+        final shortcuts = PlaybackShortcutController(
+          session: session,
+          settings: () => const ShortcutSettings.defaults(),
+          active: () => true,
+          fullscreen: () => false,
+          toggleFullscreen: () {},
+          toggleDanmaku: () {},
+          volumeFeedback: (_) {},
+        );
+        const down = InputStroke(
+          identity: 'right',
+          device: InputDevice.keyboard,
+          phase: InputPhase.down,
+          sequence: 1,
+          chord: ShortcutChord('ArrowRight'),
+        );
+        await shortcuts.execute(ShortcutAction.seekForward, down);
+        await tester.pump(const Duration(milliseconds: 399));
+        expect(engine.rateCalls, isEmpty);
+        await shortcuts.execute(
+          ShortcutAction.seekForward,
+          const InputStroke(
+            identity: 'right',
+            device: InputDevice.keyboard,
+            phase: InputPhase.repeat,
+            sequence: 2,
+            chord: ShortcutChord('ArrowRight'),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 1));
+        expect(engine.rateCalls, [2]);
+        expect(shortcuts.isHoldingRate, isTrue);
+        await shortcuts.execute(
+          ShortcutAction.seekForward,
+          const InputStroke(
+            identity: 'right',
+            device: InputDevice.keyboard,
+            phase: InputPhase.up,
+            sequence: 3,
+          ),
+        );
+        await tester.pump();
+        expect(engine.rateCalls, [2, 1]);
+        expect(engine.seekTargets, isEmpty);
+        expect(engine.playCount, playCount);
+        expect(engine.pauseCount, pauseCount);
+        expect(engine.currentSnapshot, before);
+        shortcuts.dispose();
+        await tester.runAsync(session.close);
+      },
+    );
+  }
+  test(
+    'same-rate hold and restoration do not send redundant native commands',
+    () async {
+      final engine = _FakeEngine();
+      final session = PlaybackSession(
+        engine: engine,
+        repository: _FakeRepository(autoResolve: true),
+        progress: _FakeProgress(),
+        accountScope: () => 'guest',
+      );
+      addTearDown(session.close);
+      await session.open(_detail('1'), _part('1'));
+      await session.beginTemporaryRate(1);
+      await session.endTemporaryRate();
+      expect(engine.rateCalls, isEmpty);
+    },
+  );
+  test(
+    'pinning an active touch hold remembers rate without applying it twice',
+    () async {
+      final engine = _FakeEngine();
+      final memory = PlaybackRateMemory();
+      final session = PlaybackSession(
+        engine: engine,
+        repository: _FakeRepository(autoResolve: true),
+        progress: _FakeProgress(),
+        accountScope: () => 'guest',
+        rateMemory: memory,
+      );
+      addTearDown(session.close);
+      await session.open(_detail('1'), _part('1'));
+      final shortcuts = PlaybackShortcutController(
+        session: session,
+        settings: () => const ShortcutSettings.defaults(),
+        active: () => true,
+        fullscreen: () => false,
+        toggleFullscreen: () {},
+        toggleDanmaku: () {},
+        volumeFeedback: (_) {},
+      );
+      addTearDown(shortcuts.dispose);
+      shortcuts.prepareTouchHold();
+      shortcuts.beginTouchHold();
+      // The recognizer already waited; begin must not introduce another timer.
+      expect(engine.rateCalls, [2]);
+      await _flush();
+      shortcuts.moveTouchHold(dx: 0, dy: -60);
+      await _flush();
+      shortcuts.endTouchHold();
+      await _flush();
+      expect(engine.rateCalls, [2]);
+      expect(memory.rateFor(1), 2);
+      expect(shortcuts.isRateFixed, isTrue);
+      await session.open(_detail('2'), _part('2'));
+      expect(engine.currentSnapshot.rate, 2);
+    },
+  );
+  test(
+    'release of a queued hold skips its cancelled rate and redundant restore',
+    () async {
+      final engine = _FakeEngine();
+      final session = PlaybackSession(
+        engine: engine,
+        repository: _FakeRepository(autoResolve: true),
+        progress: _FakeProgress(),
+        accountScope: () => 'guest',
+      );
+      addTearDown(session.close);
+      await session.open(_detail('1'), _part('1'));
+      final gate = Completer<void>();
+      engine.nextRate = gate;
+      final permanent = session.setRate(2);
+      final hold = session.beginTemporaryRate(3);
+      final release = session.endTemporaryRate();
+      gate.complete();
+      await Future.wait([permanent, hold, release]);
+      expect(engine.rateCalls, [2]);
+      expect(engine.currentSnapshot.rate, 2);
+      expect(engine.seekTargets, isEmpty);
     },
   );
   test('permanent rate chosen during pending temporary speed survives restoration and inheritance', () async {
@@ -5599,6 +6178,51 @@ PlaybackMedia _media(
   headers: const {'Referer': 'https://www.bilibili.com'},
 );
 
+PlaybackMedia _audioMedia({bool lossless = true}) {
+  final aac = PlaybackTrack(
+    urls: [Uri.https('example.test', '/aac.m4a')],
+    codec: 'mp4a.40.2',
+    bandwidth: 192000,
+  );
+  final flac = PlaybackTrack(
+    urls: [Uri.https('example.test', '/flac.m4a')],
+    codec: 'fLaC',
+    bandwidth: 900000,
+  );
+  return PlaybackMedia(
+    video: _media('one', 80, const Duration(minutes: 2)).video,
+    audio: aac,
+    audioTracks: [
+      PlaybackAudioTrack(quality: AudioQualityPreference.aac192, track: aac),
+      if (lossless)
+        PlaybackAudioTrack(
+          quality: AudioQualityPreference.lossless,
+          track: flac,
+        ),
+    ],
+    quality: 80,
+    qualities: const [64, 80],
+    duration: const Duration(minutes: 2),
+    headers: const {},
+  );
+}
+
+PlaybackMedia _colorMedia(int quality) {
+  final base = _media('color', quality, const Duration(minutes: 2));
+  return PlaybackMedia(
+    video: PlaybackTrack(
+      urls: base.video.urls,
+      codec: quality == 126 ? 'dvh1.05.06' : 'hev1',
+      bandwidth: 1000,
+    ),
+    audio: base.audio,
+    quality: quality,
+    qualities: const [80, 125, 126],
+    duration: base.duration,
+    headers: base.headers,
+  );
+}
+
 PlaybackMedia _backupMedia() => PlaybackMedia(
   video: PlaybackTrack(
     urls: [
@@ -5631,6 +6255,7 @@ final class _FakeRepository implements PlaybackRepository {
   });
   bool autoResolve;
   PlaybackMedia? resolvedMedia;
+  PlaybackMedia Function(int quality)? mediaForQuality;
   AudioLoudness? loudness;
   bool failNextResolve = false;
   final Duration mediaDuration;
@@ -5663,7 +6288,8 @@ final class _FakeRepository implements PlaybackRepository {
     }
     if (autoResolve) {
       return Future.value(
-        resolvedMedia ??
+        mediaForQuality?.call(quality) ??
+            resolvedMedia ??
             _media(cid, quality, mediaDuration, loudness: loudness),
       );
     }
@@ -5898,6 +6524,7 @@ final class _FakeEngine implements PlayerEngine, AudioGainControl {
   final sources = <ResolvedMediaSource>[];
   final seekTargets = <Duration>[];
   Completer<void>? nextRate;
+  final rateCalls = <double>[];
   Completer<void>? nextVolume;
   Completer<void>? nextGain;
   final gainCalls = <double>[];
@@ -6039,6 +6666,7 @@ final class _FakeEngine implements PlayerEngine, AudioGainControl {
 
   @override
   Future<void> setRate(double rate) async {
+    rateCalls.add(rate);
     final generation = _current.generation;
     final gate = nextRate;
     nextRate = null;
@@ -6129,6 +6757,8 @@ final class _FakeContentRepository implements ContentPlaybackRepository {
   _FakeContentRepository({this.duration = const Duration(minutes: 2)});
   final Duration duration;
   AudioLoudness? loudness;
+  PlaybackMedia? resolvedMedia;
+  PlaybackMedia Function(int quality)? mediaForQuality;
   int liveLineCount = 1;
   final targets = <ContentPlaybackTarget>[];
   final qualities = <int>[];
@@ -6149,6 +6779,10 @@ final class _FakeContentRepository implements ContentPlaybackRepository {
     final gate = pending;
     pending = null;
     if (gate != null) return gate.future;
+    if (mediaForQuality case final factory?) {
+      return Future.value(factory(quality));
+    }
+    if (resolvedMedia case final media?) return Future.value(media);
     if (target is OfflinePlaybackTarget) {
       return Future.value(_media('offline', quality, duration));
     }

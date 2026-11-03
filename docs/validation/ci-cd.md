@@ -1,11 +1,11 @@
 # GitHub Actions CI/CD 与安装包
 
-更新日期：2026-11-01。配置覆盖 Android arm64、Windows x64、macOS arm64／Intel x64、iOS arm64、Linux x64；iOS／Linux 的远端构建进展与设备未验项详见[接入记录](ios-linux.md)，Intel macOS 的新增配置与验证边界见下文。本地验证结果与远端、设备未测项分别记录。此流程交付预览构建，不表示各平台验收或 M5 正式发行完成。
+更新日期：2026-11-02。配置覆盖 Android arm64、Windows x64、macOS arm64／Intel x64、iOS arm64、Linux x64；iOS／Linux 的远端构建进展与设备未验项详见[接入记录](ios-linux.md)，Intel macOS 的新增配置与验证边界见下文。本地验证结果与远端、设备未测项分别记录。此流程交付预览构建，不表示各平台验收或 M5 正式发行完成。
 
 ## 入口与分工
 
 - [CI](../../.github/workflows/ci.yml)：替换原来的 `windows.yml`；分支 push、PR、手动运行时执行检查及构建，也供 Release 复用。
-- [Release preview](../../.github/workflows/release.yml)：在 Actions 页面手动运行；可选择五个平台，并可按目标复用同提交、同版本且已通过检查与构建的 CI 产物，只补建缺少的目标。全部所选构建通过后创建 **draft + prerelease** 并上传包、签名公钥证书、校验文件与第三方说明。不会自动公开发布。
+- [Release preview](../../.github/workflows/release.yml)：在 Actions 页面手动运行；可选择五个平台，并可按目标复用同提交、同版本且已通过检查与构建的 CI 产物，只补建缺少的目标。全部所选构建通过后，将完整产物汇总上传为单个 Actions ZIP artifact，再创建 **draft + prerelease** 并上传包、签名公钥证书、校验文件与第三方说明。不会自动公开发布。
 - [检查脚本](../../tool/check.ps1)：本地默认检查根应用和四个独立包；CI 在 Ubuntu 使用 PowerShell 7，分别执行 `Lint`、两份 `RootTests` 分片和 `PackageTests`。格式检查覆盖根应用与各包，根分析统一扫描子包，故分析前仍安装所有包的开发依赖。`-EnforceLockfile` 要求 pub 使用提交的锁文件及内容哈希。
 - [构建打包脚本](../../tool/build-release.ps1)：各平台使用对应主机生成预览包，缺文件、原生命令失败、签名失败立即停止。已有同目标输出目录时拒绝覆盖，重新本地构建前先将其移走。
 
@@ -15,10 +15,10 @@
 | Android | `ubuntu-24.04`，Temurin JDK 17 | 仅 arm64 的 release APK；本 fork 统一使用 runner 本地 debug keystore 签名（含 Release），不注入仓库签名密钥 |
 | Windows | `windows-2022`，Visual Studio C++ / Windows SDK / .NET 8 / WiX 6.0.2 | 同时提供 x64 MSIX、MSI 和 EXE 安装包；全部包含完整原生 DLL/data 及 VC++ runtime |
 | macOS | `macos-15`，Apple Silicon / Xcode | arm64 DMG；先验证签名／最终权限、同一 Release 应用首帧和跨进程 Keychain 读写删除，再由 `hdiutil` 打包校验；仅 ad-hoc 签名，未 notarize |
-| macOS Intel | `macos-15-intel`，Intel x64 / Xcode | x64 DMG；复用相同的签名、首帧、Keychain 和镜像校验门槛 |
+| macOS Intel | `macos-15-intel`，Intel x64 / Xcode | x64 DMG；校验架构、版本、签名、权限和镜像；不运行启动／窗口／Keychain smoke，metadata 明确记录跳过 |
 | iOS | `macos-15`，Apple Silicon / Xcode / CocoaPods | arm64 未签名 IPA；核对应用版本、bundle ID、arm64 framework 及 Payload 布局；安装前需自行 Apple 签名 |
 | Linux | `ubuntu-24.04`，GTK / libsecret / libmpv / Flatpak SDK | x64 AppImage 与 Flatpak；携带媒体依赖，核对版本及主机／实际 Flatpak Runtime 内动态依赖；X11／XWayland |
-| Release 上传 | `ubuntu-24.04` | 合并本次所选平台的 Actions artifacts 后创建草稿 |
+| Release 上传 | `ubuntu-24.04` | 合并并校验本次所选平台的 Actions artifacts，上传汇总 ZIP artifact 后创建草稿 |
 
 PowerShell 7 是跨平台 shell；Ubuntu 上复用 `.ps1` 不要求 Windows。Windows 原生构建需要 Windows 主机与 Visual Studio 工具链，macOS 原生构建需要对应架构的 macOS/Xcode 主机。现有 `enable_macos` 开关同时控制 arm64 和 x64 两项矩阵；两项分别安装对应架构的 Flutter SDK，产物与缓存按架构隔离。arm64 启用 `--enable-macos-arm64-only`，x64 显式关闭该选项；两者均通过固定 SDK 支持的 `FLUTTER_XCODE_ARCHS` 指定单一架构（`arm64`／`x86_64`），与对应的 mux framework 一致。参见 [Flutter Windows 构建](https://docs.flutter.dev/platform-integration/windows/building)、[GitHub runner 范围](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)。
 
@@ -46,11 +46,15 @@ Dart 3.13.5 内置的 [Pub 源码](https://github.com/dart-lang/pub/blob/ec276d1
 
 - Android 的 `.apk`、Windows 的 `.msix` / `.msi` / `.exe`、macOS 的 `.dmg`、Linux 的 `.AppImage` / `.flatpak`，命名均为 `BiliSail-<version>-<target>.<extension>`；iOS 使用 `BiliSail-<version>-ios-arm64-unsigned.ipa`。
 - Windows 包旁的 `.cer`，只含签名证书公钥。
-- `.build-info.json`：源码 revision 与 `sourceDirty`、Flutter/engine/Dart 版本、目标、签名类型、Android 签名证书 SHA-256、Windows MSI 内部版本与 WiX 版本、runner image、根锁文件 SHA-256；macOS 的 `macosValidation` 保存发布门槛的通过状态。
+- `.build-info.json`：源码 revision 与 `sourceDirty`、Flutter/engine/Dart 版本、目标、签名类型、Android 签名证书 SHA-256、Windows MSI 内部版本与 WiX 版本、runner image、根锁文件 SHA-256；macOS 的 `macosValidation` 保存校验结果，x64 的 `startup`／`credentials` 为 `skipped`，并记录 `runtimeSmokeSkipReason=disabled-for-build-target`。
 - `.mux-source.zip`：mux 组件源码归档及重建说明。
 - 每个上述文件对应的 `.sha256`，格式兼容 `sha256sum -c`。
 
 Release 草稿只附安装包、Windows 公钥证书及它们的 `.sha256`，另附 `THIRD_PARTY_NOTICES.md`。`.build-info.json`、`.mux-source.zip` 和这两类文件的 `.sha256` 继续保存在 Actions artifacts 中并参与上传前校验，不加入 Release 附件；草稿说明链接到本次 Actions 记录，可从构建来源汇总定位对应产物。
+
+2026-11-01 起，Release 在完整性、来源、版本和 SHA-256 校验通过后，使用与 CI 相同的固定版本 [`actions/upload-artifact`](https://github.com/actions/upload-artifact#upload-using-multiple-paths-and-exclusions)，将本次所选平台的新建及复用产物汇总为 `BiliSail-<version>-release-bundle`，保留 14 天。可在本次 Release 运行的 Artifacts 区域一次下载同名 `.zip`；其中 `release-assets/` 包含安装包、Windows 公钥证书、构建信息、mux 源码归档及各自校验文件，根目录另含 `THIRD_PARTY_NOTICES.md`。由 artifact 上传直接生成 ZIP，压缩级别沿用 CI 的 `0`，避免重复压缩已有安装包。汇总上传在草稿创建前完成，上传失败则停止创建草稿；之后草稿或清理步骤失败时，已上传的汇总包仍保留。重跑本次运行的草稿任务时覆盖同名汇总包，草稿任务超时从 10 分钟增至 20 分钟，为额外上传留出时间。
+
+本轮本地验证：Release／CI 工作流通过 actionlint 1.7.12，60 项 Release 定向回归、本文件 43 条本地链接和 `git diff --check` 通过。`tool/check.ps1 -SkipPub` 的打包边界、格式、静态分析、根应用 3912 项及四包 817 项离线测试通过；13 项 Windows symlink 用例因权限跳过，10 项 mux 原生用例因未配置 `BILI_MUX_LIBRARY` 跳过，不计作原生覆盖。日志保存在 `build/release-bundle-check.log`；本轮未手动运行远端 Release，汇总 artifact 的实际上传和下载仍待新流程运行确认。
 
 2026-10-31 附件筛选验证：`node --test tool/test-release-ci-reuse.cjs` 的 54 项测试通过，新增回归直接执行工作流的 PowerShell 草稿步骤并模拟 `gh`，核对六个目标的完整附件集合及原始 Actions 文件保留。Release／CI 工作流通过 actionlint，本文件 38 条本地链接和 `git diff --check` 通过。`tool/check.ps1 -SkipPub` 的打包边界、格式、静态分析及 4645 项离线测试通过；13 项 Windows symlink 用例因权限跳过，10 项 mux 原生用例因未配置 `BILI_MUX_LIBRARY` 跳过，不计作原生覆盖。日志保存在 `build/release-asset-selection-check.log`；本轮未运行远端 Release 或创建实际草稿。
 
@@ -81,7 +85,7 @@ Release 通过 `workflow_call` 调用同一份 `ci.yml`，检查、根应用分�
 
 CI 仅在 `workflow_call` 开放内部 `build_targets` JSON 数组输入，将构建矩阵限制为启用平台的非空子集，不改变普通 push、PR 和手动 CI 的平台选择方式。Release 仍先验证全部所选平台的版本限制，待补建列表不能加入未选中、重复或非法目标。
 
-草稿任务从本次运行下载补建产物，再按各目标的来源 run ID 和准确 artifact 名称，通过 `gh run download` 合并复用产物，无需重复上传到当前运行。API 权限、网络或下载错误均使任务失败，不将故障当作未命中，也不丢弃缺失平台；使用任务级 `actions: read` 和现有 `GITHUB_TOKEN`，无需新 Secret。每个目标的复用／构建决定及来源运行链接写入 Actions summary。
+草稿任务从本次运行下载补建产物，再按各目标的来源 run ID 和准确 artifact 名称，通过 `gh run download` 合并复用产物；复用来源无需按平台重复上传，但会随全部所选产物进入本次运行的汇总包。API 权限、网络或下载错误均使任务失败，不将故障当作未命中，也不丢弃缺失平台；使用任务级 `actions: read` 和现有 `GITHUB_TOKEN`，无需新 Secret。每个目标的复用／构建决定及来源运行链接写入 Actions summary。
 
 无论复用还是新构建，创建草稿前都会经[产物校验脚本](../../tool/release-ci-reuse.cjs)核对完整文件集合：所选平台安装包、Windows 公钥证书、build-info、mux 源码归档及各自 SHA-256。build-info 必须匹配源码 SHA、版本、目标、Flutter 版本、根锁文件哈希且 `sourceDirty=false`；锁文件允许同一内容的 LF／CRLF checkout 哈希差异。本 fork 的 Android 产物统一为本地 debug 签名，`temporary-debug-key` 允许发布；其他未知签名方式仍拒绝。下载后任何内容不符立即停止，不创建草稿，也不静默改用其他产物。既有 tag 冲突检查、草稿／预发布属性和最新 15 个 Release 保留规则继续沿用。
 
@@ -133,6 +137,12 @@ Release 草稿及全部附件上传成功后，使用 GitHub 官方 [actions/git
 
 本机 Windows / Flutter 3.47.6 的 `tool/check.ps1 -SkipPub` 全部通过，覆盖打包边界、格式、静态分析及 4651 项 Dart／Flutter 测试（根应用 3860、API 536、播放器 105、弹幕 145、封装 5）。13 项 Windows 符号链接用例因权限不足、10 项 mux 原生用例因未配置 `BILI_MUX_LIBRARY` 跳过，不计作原生覆盖。本文 43 条本地链接与 `git diff --check` 通过，五份锁文件无修改。日志为 `build/api-deadline-clock-fix-check.log`。本次修改仅涉及测试与验证记录，未执行新安装包构建或设备操作；没有运行中的调试应用可执行热重载。
 
+### Intel macOS 打包前 GUI 验收超时（2026-11-02）
+
+[CI 41323620524](https://github.com/CKopoer/BiliSail/actions/runs/41323620524/job/124901479137) 只有 Intel macOS job 失败：Release 编译及签名已完成，两轮播放窗 Space 检查通过后，启动探测超时；其他五个平台与所有检查通过。线程采样定位到 AppKit 应用激活／WindowServer 与虚拟 GPU 等待。共享窗口激活现在仅在应用未激活时请求 `NSApp.activate`，并补充窗口再激活和回收阶段记录；完整证据、修复范围及本机验证边界见[启动专项](macos-release-startup.md#2026-11-02intel-重复应用激活与图形等待)。原有发布验收与超时门槛继续保留，新的 Intel 原生运行结果仍待对应 CI 复验。
+
+后续 [CI 41436650047](https://github.com/CKopoer/BiliSail/actions/runs/41436650047/job/125252164120) 仍在第二轮窗口回收时耗尽 60 秒总预算；上一次成功运行的同类回收单次就耗时约 30.8 秒。本轮将共享校验入口的组合 GUI `startup` 预算独立设为 180 秒，凭据执行仍为 60 秒，原生启动仍为 180 秒；保留完整断言和独立硬超时，不自动重试。两份工作流的构建步骤／job 上限继续为 30／40 分钟。证据、父进程与 worker 预算传递及远端验证边界见[组合 GUI 执行预算](macos-release-startup.md#2026-11-02组合-gui-检查的执行预算)。
+
 ## Android 本地 debug 签名
 
 本 fork 自 2026-11-01 起不再使用仓库固定 release keystore。push、手动 CI 和 Release 的 Android arm64 APK 全部由 runner 的本地 debug keystore 签名，工作流不注入、也不接收 `ANDROID_KEYSTORE_BASE64` 等签名密钥；`.github/workflows/ci.yml` 的 `workflow_call.secrets` 只保留 Windows MSIX 证书。
@@ -167,7 +177,7 @@ Release 草稿及全部附件上传成功后，使用 GitHub 官方 [actions/git
 
 ## macOS DMG 安装
 
-macOS 分别生成 `BiliSail-<version>-macos-arm64.dmg` 和 `BiliSail-<version>-macos-x64.dmg`，按 Apple Silicon／Intel 芯片选择。脚本用 `lipo -verify_arch` 核对主程序、App、FlutterMacOS 与 BiliMux framework 的目标架构，再使用 `ditto` 复制完整 `BiliSail.app`，调用 [macOS 发布验证](../../tool/macos-release-validation.ps1) 校验签名、最终权限，并启动这份待打包的 Release 应用验证首帧和跨进程 Keychain 读写／删除。通过后在镜像根目录加入指向 `/Applications` 的符号链接与 `THIRD_PARTY_NOTICES.md`，使用 `hdiutil create -srcfolder ... -fs HFS+ -format UDZO` 创建压缩只读镜像并执行 `hdiutil verify`；任一步失败均停止，不上传产物。CI 与 Release 共用此脚本，现有上传通配符同时覆盖两种架构的 DMG、metadata、mux 源码和 SHA-256 文件。
+macOS 分别生成 `BiliSail-<version>-macos-arm64.dmg` 和 `BiliSail-<version>-macos-x64.dmg`，按 Apple Silicon／Intel 芯片选择。脚本用 `lipo -verify_arch` 核对主程序、App、FlutterMacOS 与 BiliMux framework 的目标架构，再使用 `ditto` 复制完整 `BiliSail.app`，调用 [macOS 发布验证](../../tool/macos-release-validation.ps1) 校验签名、最终权限和可执行文件。arm64 继续启动待打包的 Release 应用验证首帧、窗口交互和跨进程 Keychain 读写／删除；2026-11-02 起按用户要求，x64 不运行这些 smoke，明确记录跳过。通过所选门槛后在镜像根目录加入指向 `/Applications` 的符号链接与 `THIRD_PARTY_NOTICES.md`，使用 `hdiutil create -srcfolder ... -fs HFS+ -format UDZO` 创建压缩只读镜像并执行 `hdiutil verify`；任一保留步骤失败均停止，不上传产物。CI 与 Release 共用此脚本，现有上传通配符同时覆盖两种架构的 DMG、metadata、mux 源码和 SHA-256 文件。
 
 2026-10-29 增加 Intel macOS 构建：下载封装组件新增 `macos-x64` 目标，FFmpeg 与 C++ 包装均以 `x86_64`、最低 macOS 12 编译，并沿用独立目标目录、来源归档和 framework 打包流程。最终 [CI #221](https://github.com/CKopoer/BiliSail/actions/runs/40804720827)（代码提交 `64acaa709315b9c91e15c67ae173f56b05689570`）的 Intel／arm64 hosted 构建、签名校验、待打包应用首帧、跨进程合成 Keychain 读写／删除和 DMG 校验均通过。该次运行全部检查及六个平台构建通过，产物均已上传；实际 DMG 安装升级、Gatekeeper、真实账号、音视频播放与设备操作仍待验收。兼容修复与本地检查见 [Native Assets 迁移记录](../predidit-media-migration.md#ci-构建兼容修复2026-10-29)。
 

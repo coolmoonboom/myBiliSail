@@ -27,3 +27,34 @@
 - 6 份改动文档的 273 个本地链接及 `git diff --check` 通过。
 
 本轮未操作用户运行中的正式客户端；隔离 HWND 回归不是完整 Flutter 客户端的拖动、跨屏 DPI 与播放验收。macOS／Linux 尚未构建或实机验收；当前 Windows 主机没有 Apple 工具链，WSL 未配置 GTK 开发环境。未进行性能测量。本次应用逻辑未改 Dart，不需要热重载；原生窗口改动由完整 Windows Release 重建验证。
+
+## 窄屏播放窗重开首帧尺寸（2026-11-01）
+
+**后续用户反馈仍显示异常。本节回归只证明首帧尺寸返回完整，没有覆盖共享原生插件对客户区计算的干扰；不能据此认定实际画面已修复，进一步定位见下一节。**
+
+用户反馈双标签播放窗保存为窄屏后，关闭并打开另一个视频时页面显示异常。Windows 的普通窗口恢复原生矩形后，Flutter view 的尺寸通知可能尚未更新；此前 `restoreGeometry` 只为首次最大化返回目标客户区尺寸，普通窗口首帧仍可能使用创建时的默认宽度。首帧内容定尺寸与保护保存外框的原生钩子因此可能使用不同尺寸。
+
+原生恢复现在也为普通窗口返回实际客户区的物理尺寸，由现有 Dart 适配器换算成逻辑尺寸布局首帧。首次最大化仍返回显示器工作区尺寸；首显或取消后不再提供初始尺寸覆盖，后续用户缩放继续使用实际 view 约束。Dart 只同步接口注释，没有修改可执行逻辑。
+
+- 新增隔离 Win32 回归，分别保存 460／1100 物理像素宽的普通窗口，各连续重开两次，检查恢复后仍隐藏、首帧尺寸等于客户区而非默认宽度或外框、SDK 初始内容定尺寸不改变保存外框，以及首显／释放后清除初始覆盖。旧实现在“普通窗口未返回初始客户区尺寸”断言失败，日志为 `build/narrow-window-before.log`。
+- `tool/test-window-geometry.ps1` 通过，包含新增窄／宽屏重开及既有最大化、还原、全屏、取消、旧 owner 隔离和持久化回归；日志为 `build/narrow-window-after.log`。
+- 窗口服务、独立窗口生命周期、顶部栏、播放窗口与双 view 工作区的 64 项定向 Flutter 测试通过；日志为 `build/narrow-window-targeted-tests.log`。
+- `tool/check.ps1 -SkipPub -Stage Lint` 的格式、静态分析和打包边界检查通过，`git diff --check` 通过；日志为 `build/narrow-window-lint.log`。未运行全量根应用／子包测试。
+
+本次按用户要求完成相关单元／组件测试，不构建客户端、不进行设备操作或性能测量；完整 Flutter 窄屏重开后的实际画面及跨屏 DPI 留待用户构建验收。原生回归运行于隔离桌面，不读写用户的窗口状态记录。
+
+## 主窗口边框策略干扰播放客户区（2026-11-01）
+
+用户复测截图仍有右侧留白和顶部按钮重复。进一步核对固定 Flutter 3.47.6 的 `HostWindow::HandleMessage` 与 `window_manager 0.5.2` 的 `WindowManagerPlugin::HandleWindowProc`：SDK 管理的次级窗口也会进入共享插件的顶层消息代理，而插件的隐藏标题栏分支用主窗口的 `IsMaximized()` 状态处理传入 HWND 的 `WM_NCCALCSIZE`。主窗口最大化、播放窗口普通且位置偏离工作区原点时，插件会将播放客户区左右边界扩展到自身外框之外。
+
+此前 `PlaybackWindowFrame` 调用 `DefSubclassProc` 计算基础客户区，会经过该插件策略；SDK 随后按错误客户区移动和缩放 Flutter 子窗口。上一轮返回实际客户区尺寸仍会返回这个已被污染的矩形，因此不能解决此路径。
+
+播放窗现在在自己的 `WM_NCCALCSIZE` 分支直接调用 `DefWindowProcW` 获取本窗口的系统边框，再应用既有自绘标题栏顶部规则；全屏也跳过主窗口的边框策略。其余消息仍沿用原有转发，不修改 SDK、Pub 缓存、插件依赖或主窗口配置。
+
+新增隔离 Win32 测试夹具模拟 SDK 的子窗口缩放及共享插件的主窗口最大化分支。保存 460 物理像素宽、非原点位置的播放窗，分别在主窗口普通／最大化条件下连续重开两次，验证隐藏准备及首显后的客户区宽度、子窗口尺寸和相对原点，并验证进入全屏及还原。上一版代码在“主窗口代理破坏播放客户区宽度”断言失败，日志为 `build/narrow-frame-delegate-before.log`。
+
+- `tool/test-window-geometry.ps1` 通过，MSVC `/W4 /WX` 编译通过；新增客户区／子窗口隔离与既有首显、最大化、还原、全屏、取消及持久化回归通过。日志为 `build/narrow-frame-delegate-final.log`。
+- 64 项窗口及工作区定向 Flutter 测试通过，日志为 `build/narrow-frame-delegate-targeted.log`。
+- `tool/check.ps1 -SkipPub -Stage Lint` 和 `git diff --check` 通过，日志为 `build/narrow-frame-delegate-lint.log`。未运行全量根应用／子包测试。
+
+本次继续遵循用户只做相关单元测试的范围；不构建或运行客户端，实际窄屏重开画面和跨屏 DPI 仍待用户构建验收。
